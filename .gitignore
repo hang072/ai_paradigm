@@ -1,0 +1,37 @@
+# 跨端通用忽略项
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.log
+
+# ===== 前端 =====
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+frontend/coverage/
+frontend/.vite/
+
+# ===== E2E =====
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/
+
+# ===== 后端 =====
+backend/.env
+backend/.env.local
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+backend/logs/
+backend/server.exe
+backend/server
+backend/vendor/
+
+# ===== 其他 =====
+*.swp
+*.swo
+*~

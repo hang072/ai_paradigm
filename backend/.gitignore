@@ -1,0 +1,17 @@
+# Go 专属忽略项
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+.env
+.env.local
+
+# SQLite 数据库文件 (含 WAL/SHM 副本)
+data/*.db
+data/*.db-shm
+data/*.db-wal
