@@ -22,6 +22,18 @@ export default defineConfig({
     //   netstat -ano | grep :5173  →  taskkill /F /PID <pid>
     strictPort: true,
     proxy: {
+      // 阶段 5 续 5 P91: 代理后端 /api/* 到 :8001 (dev-only)
+      // 让 http://localhost:5173/api/kb/.../images/*.png 等 URL 也能工作
+      // 生产部署由 nginx / caddy 配反向代理
+      '/api': {
+        target: 'http://127.0.0.1:8001',
+        changeOrigin: true,
+        configure: (proxy, options) => {
+          proxy.on('error', (err, req, res) => {
+            console.log('proxy /api error', err);
+          });
+        },
+      },
       // 代理 LLM API 请求解决 CORS 问题
       '/zh/api': {
         target: 'https://api-doc.aa.com.cn/v1',

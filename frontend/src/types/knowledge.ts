@@ -77,8 +77,10 @@ export interface DocStructure {
   kb_id: string;
   pages_n: number;
   markdown: string;
-  /** VLM 原始返的 pages/blocks JSON, 后端会做 json.Unmarshal */
-  structure: { pages: DocStructurePage[]; merged_tables?: DocStructureTable[] };
+  /** VLM 原始返的 pages/blocks JSON, 后端会做 json.Unmarshal。 pymupdf 时是 page_chunks 数组而非 {pages, blocks}, 需用 structure_schema 分支 */
+  structure: { pages?: DocStructurePage[]; merged_tables?: DocStructureTable[] };
+  /** P91: 后端填的 schema 标识 "qwen-vl" | "pymupdf" | "" (空 = 旧数据 Qwen-VL) */
+  structure_schema?: 'qwen-vl' | 'pymupdf' | string;
   /** P85: pdfcpu 抽出的 embedded images, [{idx, filename, file_type, byte_size, width, height, page_nr, obj_nr}] */
   images: DocStructureImage[];
   updated_at: string;

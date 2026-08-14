@@ -360,8 +360,14 @@ POST /api/chat/reply  { message, mode, agent_id?, team_template_id?, tools, skil
 - `go build ./...` · `go vet ./...` · `go test ./...` 全绿
 - `docker compose -f docker-compose.yml config --quiet` 通过
 - PoC 14 份医学 PDF 抽图 100% (41/41), 1-2.5s/份
+- 真实 5 页医学 PDF 上传 → sidecar 抽 2 张 (image_001=11.4KB page2 / image_002=18.9KB page4), 磁盘 + sidecar 元数据一致
 
-**修改文件**:1 个 sidecar 全栈(4 文件) + 1 Dockerfile + 1 .dockerignore + 1 docker-compose.yml + 8 个 Go 文件 + 2 个测试 + 2 个文档 = 19 个文件
+**后续小修** (P91 上线后用户反馈):
+- `frontend/vite.config.ts` 加 `proxy: { '/api': http://127.0.0.1:8001 }` —— 解决用户在浏览器直接 `localhost:5173/api/kb/.../images/...` 走 vite static server 返 404(axios 走 `VITE_API_BASE` 不受影响,这条只覆盖地址栏直输场景)
+- `frontend/src/router/index.tsx` 加 `path: '*'` 兜底 → AntD `Result status=404` 友好页(替换默认 "💿 Hey developer")
+- 测试 13 个 case: `TestPersistImages_*` (6) + `TestKbImages_*` (6) + `TestPymupdfE2E` (1) 全绿
+
+**修改文件**:1 个 sidecar 全栈(4 文件) + 1 Dockerfile + 1 .dockerignore + 1 docker-compose.yml + 8 个 Go 文件 + 2 个测试 + 4 个文档 + 1 vite config + 1 router = 21 个文件
 
 ### 2026-08-14 · 阶段 5 续 5 P85 · PDF 内嵌图片提取
 

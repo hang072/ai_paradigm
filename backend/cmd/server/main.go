@@ -107,6 +107,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("init milvus: %v", err)
 	}
+
+	// 阶段 5 续 5 P91: PyMuPDF sidecar (PDF 抽文本/图/表)
+	// hard-dep: 启动时 ping /health, 失败 → fatal (P91 全替决策, 不静默降级)
+	pymupdfCli, err := embedding.NewPymupdfClientFromEnv()
+	if err != nil {
+		log.Fatalf("init pymupdf sidecar: %v (start uvicorn / docker compose up pymupdf-sidecar)", err)
+	}
+	parser.SetPymupdfClient(pymupdfCli)
+	log.Printf("pymupdf sidecar ready: %s", pymupdfCli.BaseURL())
 	defer milvusCli.Close()
 	jobQ := embedding.NewJobQueue(embedder, milvusCli, kbStore, kbUploads, docStructures)
 	jobQ.Start()

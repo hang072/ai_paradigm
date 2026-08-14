@@ -974,7 +974,7 @@ export default function KnowledgePage() {
         open={structureOpen}
         title={
           structure
-            ? `结构化抽取 — ${structure.pages_n} 页 / ${structure.structure.pages.reduce((n, p) => n + p.blocks.length, 0)} blocks`
+            ? `结构化抽取 — ${structure.pages_n} 页 / ${structure.structure.pages?.reduce((n, p) => n + p.blocks.length, 0)} blocks`
             : '结构化抽取'
         }
         onCancel={() => setStructureOpen(false)}
@@ -1033,8 +1033,7 @@ export default function KnowledgePage() {
             ))}
 
             {/* 公式 (LaTeX) */}
-            {structure.structure.pages
-              .flatMap((p) => p.blocks)
+            {structure.structure.pages?.flatMap((p) => p.blocks)
               .filter((b) => b.type === 'formula' && b.latex)
               .map((b, i) => (
                 <Card key={`f${i}`} size="small" title={`公式 ${i + 1}`} style={{ marginBottom: 12 }}>
@@ -1045,8 +1044,7 @@ export default function KnowledgePage() {
               ))}
 
             {/* 图 caption + 抽出图(P85) */}
-            {structure.structure.pages
-              .flatMap((p) => p.blocks)
+            {structure.structure.pages?.flatMap((p) => p.blocks)
               .filter((b) => b.type === 'figure' && b.caption)
               .map((b, i) => {
                 // 按 page_nr + idx 找抽出的图(可能 sidecar 缺图, 走 caption-only fallback)
@@ -1088,9 +1086,43 @@ export default function KnowledgePage() {
                 );
               })}
 
+            {/* P91 fallback: pymupdf 抽出的图(无 figure block / 无 caption, 直接列) */}
+            {structure.structure_schema === 'pymupdf' && (structure.images?.length ?? 0) > 0 && (
+              <Card
+                size="small"
+                title={`PDF 抽出的图 (${structure.images!.length} 张, pymupdf)`}
+                style={{ marginBottom: 12 }}
+              >
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {structure.images!.map((img, i) => {
+                    const url = KnowledgeApi.getDocImageUrl(structure.kb_id, structure.doc_id, img.filename);
+                    return (
+                      <div key={img.filename}>
+                        <a href={url} target="_blank" rel="noreferrer">
+                          <img
+                            src={url}
+                            alt={`page ${img.page_nr} image ${i + 1}`}
+                            style={{
+                              maxWidth: '100%',
+                              maxHeight: 480,
+                              borderRadius: 4,
+                              border: '1px solid #e8e8e8',
+                              cursor: 'zoom-in',
+                            }}
+                          />
+                        </a>
+                        <div style={{ marginTop: 4, fontSize: 11, color: '#999' }}>
+                          第 {img.page_nr} 页 · {img.width}×{img.height} · {(img.byte_size / 1024).toFixed(1)} KB · {img.filename}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </Space>
+              </Card>
+            )}
+
             {/* 兜底: 全部 markdown 拼起来 */}
-            {structure.structure.pages
-              .flatMap((p) => p.blocks)
+            {structure.structure.pages?.flatMap((p) => p.blocks)
               .filter((b) => b.type === 'text' || b.type === 'title' || b.type === 'list')
               .length === 0 && (
                 <Text type="secondary">纯文本见 KB 内容字段</Text>
