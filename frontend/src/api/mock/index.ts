@@ -44,6 +44,9 @@ const routes: Handler[] = [
   { method: 'POST', match: /^\/api\/templates\/?$/, handle: (_m, b) => engine.createTemplate(b) },
   { method: 'PUT', match: /^\/api\/templates\/(.+)$/, handle: (m, b) => engine.updateTemplate(m[1], b) },
   { method: 'DELETE', match: /^\/api\/templates\/(.+)$/, handle: (m) => (engine.deleteTemplate(m[1]), { ok: true }) },
+  // P92: 克隆源模板(builtin→普通)。放在 templates/{id} 通用路由后,但因 method 字段
+  // 过滤,实际路由不会冲突。
+  { method: 'POST', match: /^\/api\/templates\/(.+)\/fork$/, handle: (m) => engine.forkTemplate(m[1]) },
 
   // 阶段 3.3:Planner(mock 引擎走 static 兜底,因为浏览器无 LLM)
   { method: 'POST', match: /^\/api\/planner\/compose$/, handle: (_m, b) => engine.composePlanner(b) },
@@ -170,6 +173,9 @@ const routes: Handler[] = [
   // Chat: 主助手 + 可选子智能体调用。若配置了 API key 则主助手正文由真实 LLM 生成,
   // 否则完全走 mock 引擎(engine.generateChatReply)。
   // 子智能体调用轨迹(如果触发)都由 engine 的启发式产生 —— 真跑子 LLM 交给 backend。
+  //
+  // P92 调整:有 apiKey 时优先调真后端 /api/chat/reply(走 fetch,不经 client,避开 mock
+  // adapter 递归),后端 log/限速/审计一条龙。失败才回落 callDirectChatReply → mock。
   {
     method: 'POST',
     match: /^\/api\/chat\/reply$/,
@@ -192,14 +198,36 @@ const routes: Handler[] = [
         name: mockPart.agent_name,
         color: mockPart.agent_color,
       };
+
+      // 优先走后端(P92):统一走 /api/chat/reply, 后端读自己 .env 的 LLM key
+      try {
+        const rawBase =
+          (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://127.0.0.1:8001';
+        const base = rawBase.replace(/\/$/, '');
+        const r = await fetch(`${base}/api/chat/reply`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        });
+        if (r.ok) {
+          const parts = (await r.json()) as engine.ChatReplyPart[];
+          if (Array.isArray(parts) && parts.length > 0 && parts[0].content) {
+            return [{ ...mockPart, content: parts[0].content }];
+          }
+        } else {
+          console.warn('[mock /api/chat/reply] backend HTTP', r.status, 'fallback to direct LLM');
+        }
+      } catch (e) {
+        console.warn(
+          '[mock /api/chat/reply] backend unreachable, fallback to direct LLM:',
+          (e as Error).message,
+        );
+      }
+
+      // 回落:浏览器直连 LLM(用户自己填的 key, 不走后端限速)
       const llmParts = await callDirectChatReply(input, mainAgentInfo, activeConfig);
       const llmContent = llmParts[0]?.content ?? mockPart.content;
-      return [
-        {
-          ...mockPart,
-          content: llmContent,
-        },
-      ];
+      return [{ ...mockPart, content: llmContent }];
     },
   },
 
@@ -265,12 +293,49 @@ const routes: Handler[] = [
   {
     method: 'GET',
     match: /^\/api\/settings\/llm$/,
-    handle: () => ({ available: false, name: 'mock (frontend)' }),
+    handle: () => {
+      // P92: 跟 useAppStore 的当前 activeConfig 对齐,有 key 就 available=true
+      const { modelConfigs, activeConfigId } = useAppStore.getState();
+      const active = modelConfigs.find(c => c.id === activeConfigId);
+      return {
+        available: !!active?.apiKey?.trim(),
+        name: active?.apiKey?.trim() ? `mock(${active.model || active.provider})` : 'mock (frontend)',
+      };
+    },
   },
   {
     method: 'POST',
     match: /^\/api\/settings\/llm$/,
-    handle: () => ({ ok: true, available: false, name: 'mock (frontend)' }),
+    handle: (_m, b) => {
+      const cfg = b as { api_key?: string; provider?: string; model?: string } | undefined;
+      return {
+        ok: true,
+        available: !!cfg?.api_key?.trim(),
+        name: cfg?.api_key?.trim()
+          ? `mock(${cfg.model || cfg.provider || 'custom'})`
+          : 'mock (frontend)',
+      };
+    },
+  },
+  // P92: 模拟后端 /api/settings/llm/test 真连通性探测。含 'wrong' 模拟鉴权失败,
+  // 含 ≥10 字符 key 模拟成功。注:前端走 fetch 直连真后端,这个 mock 路由只在
+  // 纯 mock dev (VITE_API_BASE 不可达) 时由 catch 回落使用。
+  {
+    method: 'POST',
+    match: /^\/api\/settings\/llm\/test$/,
+    handle: (_m, b) => {
+      const cfg = b as { api_key?: string; provider?: string; model?: string } | undefined;
+      const key = cfg?.api_key?.trim() ?? '';
+      if (!key) return { ok: false, available: false, error: 'API key 为空' };
+      const looksValid = key.length >= 10 && !key.includes('wrong');
+      return looksValid
+        ? {
+            ok: true,
+            available: true,
+            name: `mock(${cfg?.provider ?? 'custom'}:${cfg?.model ?? 'unknown'})`,
+          }
+        : { ok: false, available: false, error: 'mock: 鉴权失败 (HTTP 401)' };
+    },
   },
 ];
 

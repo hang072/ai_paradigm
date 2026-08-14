@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
@@ -49,3 +50,16 @@ func (p *OpenaiProvider) ChatModel() model.BaseChatModel {
 func (p *OpenaiProvider) Available() bool { return true }
 
 func (p *OpenaiProvider) Name() string { return p.label }
+
+// Probe 发一个最小 chat 调用做连通性+鉴权探测(供 /api/settings/llm/test 用)。
+// OpenAI-compatible 各家都接受 system 消息 + 短文本(anthropic 也走这条兼容通道),
+// eino-ext 的 Generate 自带 HTTP client,401/超时/网络错都会透出来,无需额外解析。
+func (p *OpenaiProvider) Probe(ctx context.Context) error {
+	_, err := p.cm.Generate(ctx, []*schema.Message{
+		{Role: schema.System, Content: "ping"},
+	})
+	if err != nil {
+		return fmt.Errorf("probe failed: %w", err)
+	}
+	return nil
+}

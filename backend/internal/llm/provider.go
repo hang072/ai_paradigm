@@ -33,6 +33,10 @@ type Provider interface {
 
 	// Name 供日志用,如 "openai(deepseek-chat)" / "unavailable"。
 	Name() string
+
+	// Probe 做一次最小 chat 探测(供 /api/settings/llm/test 用),验证鉴权+连通性。
+	// Unavailable 返回 ErrUnavailable;有 key 但网络/鉴权失败时返回底层错误。
+	Probe(ctx context.Context) error
 }
 
 // ErrUnavailable 由 Unavailable{}.Complete 返回。
@@ -49,6 +53,7 @@ func (Unavailable) Stream(context.Context, []*schema.Message) (*schema.StreamRea
 }
 func (Unavailable) Available() bool { return false }
 func (Unavailable) Name() string    { return "unavailable" }
+func (Unavailable) Probe(context.Context) error { return ErrUnavailable }
 
 // Config 前端传来的单个供应商配置。
 type ModelConfig struct {
@@ -92,26 +97,7 @@ func (m *ConfigManager) Update(ctx context.Context, cfg ModelConfig) error {
 	}
 
 	// 所有供应商都是 OpenAI 兼容格式,直接用 openai client
-	baseURL := cfg.BaseURL
-	if baseURL == "" {
-		switch cfg.Provider {
-		case "deepseek":
-			baseURL = "https://api.deepseek.com/v1"
-		case "claude":
-			baseURL = "https://api.anthropic.com/v1"
-		case "openai":
-			baseURL = "https://api.openai.com/v1"
-		case "tongyi":
-			baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-		case "zhipu":
-			baseURL = "https://open.bigmodel.cn/api/paas/v4"
-		case "baidu":
-			baseURL = "https://api-doc.baidubce.com/compatible-mode/v1"
-		case "dianciyuann":
-			baseURL = "https://api.aa.com.cn/api/v1"
-		}
-	}
-
+	baseURL := ResolveBaseURL(cfg.Provider, cfg.BaseURL)
 	if cfg.Temperature == 0 {
 		cfg.Temperature = 0.7
 	}
@@ -143,6 +129,39 @@ type Config struct {
 	BaseURL     string  // 空时走 OpenAI 官方 https://api.openai.com/v1
 	Model       string  // 如 deepseek-chat / gpt-4o-mini
 	Temperature float32 // 默认 0.7
+}
+
+// ResolveBaseURL 根据 provider 名返默认 baseURL;override 非空时优先。
+//
+// 抽出来是为了让 ConfigManager.Update 和 /api/settings/llm/test 共用同一份推断逻辑。
+// 新增 provider 在这里加一行即可,两个调用方零改动。
+func ResolveBaseURL(provider, override string) string {
+	if override != "" {
+		return override
+	}
+	switch provider {
+	case "deepseek":
+		return "https://api.deepseek.com/v1"
+	case "claude":
+		return "https://api.anthropic.com/v1"
+	case "openai":
+		return "https://api.openai.com/v1"
+	case "tongyi":
+		return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	case "zhipu":
+		return "https://open.bigmodel.cn/api/paas/v4"
+	case "baidu":
+		return "https://api-doc.baidubce.com/compatible-mode/v1"
+	case "dianciyuann":
+		return "https://api.aa.com.cn/api/v1"
+	}
+	return ""
+}
+
+// NewProbeProvider 临时构造一个 OpenaiProvider(不挂到 ConfigManager),
+// 供 /api/settings/llm/test 真连通性探测用,失败不污染全局配置。
+func NewProbeProvider(ctx context.Context, cfg Config) (Provider, error) {
+	return newOpenAI(ctx, cfg)
 }
 
 // FromEnv 从环境变量读配置。

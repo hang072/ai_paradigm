@@ -29,6 +29,7 @@ func (p *streamMockProvider) Stream(_ context.Context, _ []*schema.Message) (*sc
 }
 func (p *streamMockProvider) Available() bool { return true }
 func (p *streamMockProvider) Name() string    { return "stream-mock" }
+func (p *streamMockProvider) Probe(ctx context.Context) error { return nil }
 
 // TestEnrichContentStreamTokenSink 验证:enrichContentStream 会把每帧增量通过
 // TokenSink 推出去(逐 token),并把累积正文写进 snapshot.enriched_framework。

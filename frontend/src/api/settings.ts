@@ -31,3 +31,37 @@ export const SettingsApi = {
     return r.data;
   },
 };
+
+/** /api/settings/llm/test 真连通性探测的响应。 */
+export interface TestLlmResult {
+  ok: boolean;
+  available: boolean;
+  error?: string;
+  name?: string;
+}
+
+/** 后端真连通性探测(POST /api/settings/llm/test)。
+ *
+ * 走原生 fetch 而非 axios client: client 命中 installMockAdapter() 后所有 /api/* 都被
+ * 拦截,真后端不可达 — 这里必须直连。VITE_API_BASE 缺省 127.0.0.1:8001。
+ */
+export const testLlmConnection = async (cfg: {
+  provider: string;
+  model: string;
+  api_key: string;
+  base_url?: string;
+  temperature?: number;
+}): Promise<TestLlmResult> => {
+  const rawBase = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://127.0.0.1:8001';
+  const base = rawBase.replace(/\/$/, '');
+  const r = await fetch(`${base}/api/settings/llm/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    return { ok: false, available: false, error: t || `HTTP ${r.status}` };
+  }
+  return (await r.json()) as TestLlmResult;
+};

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"paradigm_eino_backend/internal/llm"
@@ -42,6 +43,47 @@ func mountSettings(r chi.Router, mgr *llm.ConfigManager, settings *sqlite.Settin
 			"ok":        true,
 			"available": mgr.Get().Available(),
 			"name":      mgr.Get().Name(),
+		})
+	})
+
+	// POST /api/settings/llm/test —— 真连通性探测(发最小 chat 调用,验证鉴权+网络)。
+	// 与 POST /api/settings/llm 区别: 不污染 ConfigManager 状态(临时构造 provider),
+	// 8s 显式 ctx timeout 防 deepseek/anthropic 慢响应卡 UI。
+	r.Post("/settings/llm/test", func(w http.ResponseWriter, req *http.Request) {
+		var cfg llm.ModelConfig
+		if err := decodeJSON(req, &cfg); err != nil {
+			respondErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+			return
+		}
+		if cfg.APIKey == "" {
+			respondJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "available": false, "error": "API key 为空",
+			})
+			return
+		}
+		baseURL := llm.ResolveBaseURL(cfg.Provider, cfg.BaseURL)
+		if cfg.Temperature == 0 {
+			cfg.Temperature = 0.7
+		}
+		p, err := llm.NewProbeProvider(req.Context(), llm.Config{
+			APIKey: cfg.APIKey, BaseURL: baseURL, Model: cfg.Model, Temperature: cfg.Temperature,
+		})
+		if err != nil {
+			respondJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "available": false, "error": "构造 provider 失败: " + err.Error(),
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(req.Context(), 8*time.Second)
+		defer cancel()
+		if perr := p.Probe(ctx); perr != nil {
+			respondJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "available": false, "error": perr.Error(),
+			})
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "available": true, "name": p.Name(),
 		})
 	})
 

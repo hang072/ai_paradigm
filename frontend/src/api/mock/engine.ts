@@ -283,6 +283,38 @@ export function createTemplate(input: Partial<WorkflowTemplate> & { name: string
   templates.set(t.id, t);
   return t;
 }
+
+// P92: 克隆源模板为新副本(builtin→普通)。模拟后端 POST /api/templates/{id}/fork。
+export function forkTemplate(srcId: string): WorkflowTemplate {
+  const src = templates.get(srcId);
+  if (!src) throw new Error('源 Template 不存在: ' + srcId);
+  // 深拷切片 / map,builtin 必为 false,新 id 走 nanoid
+  const id = 'tpl-' + nanoid(8);
+  const forked: WorkflowTemplate = {
+    ...src,
+    id,
+    name: src.name + ' · 副本',
+    builtin: false,
+    current_version: 1,
+    versions: [1],
+    nodes: src.nodes.map((n) => ({ ...n })),
+    edges: src.edges.map((e) => ({ ...e })),
+    tags: [...(src.tags ?? [])],
+    parameter_schema: src.parameter_schema
+      ? Object.fromEntries(
+          Object.entries(src.parameter_schema).map(([k, v]) => [
+            k,
+            { ...v, enum_values: v.enum_values ? [...v.enum_values] : undefined },
+          ]),
+        )
+      : {},
+    description_required_inputs: src.description_required_inputs
+      ? [...src.description_required_inputs]
+      : [],
+  };
+  templates.set(forked.id, forked);
+  return forked;
+}
 export function updateTemplate(id: string, patch: Partial<WorkflowTemplate>): WorkflowTemplate {
   const cur = templates.get(id);
   if (!cur) throw new Error('template not found');

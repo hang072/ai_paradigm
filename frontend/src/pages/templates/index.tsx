@@ -12,6 +12,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  CopyOutlined,
   EditOutlined,
   EyeOutlined,
   PlusOutlined,
@@ -56,6 +57,19 @@ export default function TemplatesPage() {
     navigate(`/templates/${tpl.id}/edit`);
   };
 
+  // P92: 一键复制(走后端 /fork 端点)。成功后刷新列表看到新模板。
+  const copyTpl = async (tpl: WorkflowTemplate) => {
+    try {
+      const created = await TemplatesApi.fork(tpl.id);
+      message.success(`已复制: ${created.name}`);
+      // 重新拉列表,显示新条目
+      const fresh = await TemplatesApi.list();
+      setList(fresh);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
@@ -94,6 +108,9 @@ export default function TemplatesPage() {
                   </span>,
                   <span key="edit" onClick={() => editTpl(t)}>
                     <EditOutlined /> {t.builtin ? 'Fork & 编辑' : '编辑'}
+                  </span>,
+                  <span key="copy" onClick={() => copyTpl(t)}>
+                    <CopyOutlined /> 复制
                   </span>,
                   <span key="start" onClick={() => startFrom(t)}>
                     <RocketOutlined /> 从此新建任务

@@ -369,6 +369,53 @@ POST /api/chat/reply  { message, mode, agent_id?, team_template_id?, tools, skil
 
 **修改文件**:1 个 sidecar 全栈(4 文件) + 1 Dockerfile + 1 .dockerignore + 1 docker-compose.yml + 8 个 Go 文件 + 2 个测试 + 4 个文档 + 1 vite config + 1 router = 21 个文件
 
+### 2026-08-14 · 阶段 5 续 5 P92 · 5 个小 gap 一锅端
+
+**背景**:`TODO.md` 列了 5 个已知小 gap(纯前端文案错位 + 假"测试连接"按钮 + 模板卡片缺「复制」+ mock chat 直连 LLM)。Plan 调研时顺带发现第 4 个是个**真 bug**: 编辑 builtin 模板走 fork 后保存 404(走 PUT 但 fork 出来的是新 id, 后端对不存在 id 返 404)。第 3 个调研发现当前工作树已修。
+
+**用户决策**(AskUserQuestion):
+- Gap 2 = 真连通性探测(需后端加 `POST /api/settings/llm/test`)
+- Gap 4 = 后端加 `POST /api/templates/{id}/fork` 端点
+- Gap 5 = 这次也清理
+
+**变更**:
+- **后端**:
+  - `internal/llm/provider.go`: `Provider` interface 加 `Probe(ctx) error`; 抽 `ResolveBaseURL(provider, override)` 公开 helper(7 个内置 vendor + override 优先); 新增 `NewProbeProvider(ctx, cfg)` 临时构造 provider(不污染 ConfigManager); `ConfigManager.Update` 重构走 `ResolveBaseURL`
+  - `internal/llm/openai.go`: `OpenaiProvider.Probe` 发最小 chat 调用(OpenAI-compatible 各家都通, eino-ext Generate 透出 401/超时)
+  - `internal/api/settings.go`: 新 `POST /api/settings/llm/test`, 8s 显式 ctx timeout, 早返 "API key 为空" 避免网络探测
+  - `internal/api/templates.go`: 新 `POST /api/templates/{id}/fork`, 深拷 nodes/edges/tags/parameter_schema/description_required_inputs, builtin→false, store.Create 自动生成新 id, 自动写 v1
+  - `internal/llm/provider_test.go`: 新增 `TestResolveBaseURL` (10 case) + `TestUnavailable_Probe` (no network)
+  - `internal/engine/{enrich,review}_stream_test.go` + `validate_test.go`: 3 个 mock Provider 补 `Probe(ctx) error { return nil }` (新 interface 方法)
+- **前端**:
+  - `api/settings.ts`: 新增 `testLlmConnection(cfg)` 走 fetch 直连后端(避开 client 命中 mock adapter), `VITE_API_BASE` 缺省 127.0.0.1:8001
+  - `api/templates.ts`: 新增 `TemplatesApi.fork(srcId)`
+  - `pages/settings/index.tsx`: Gap 1 文案改 "持久化到后端 (SQLite settings 表, key=llm_prefs)"; Gap 2 `testConnection` 改 async 调 `testLlmConnection`, 返 `available=true` 弹成功 + 显示 name(`openai(qwen3.6-plus)`), 否则 `error` 原文进 message.error
+  - `store/useAppStore.ts`: `ModelConfig` 加 `temperature?: number` (透传给 /llm/test)
+  - `pages/templates/edit.tsx`: 导出 `forkTemplate`; 新增 `srcBuiltinId` state; **修复真 bug**: `performSave` 检测 `srcBuiltinId` 时先 `TemplatesApi.fork(srcBuiltinId)` 拿真后端副本, 再 `update` 新 id 写入用户改动, 清掉 `srcBuiltinId` 避免下次 save 重复 fork
+  - `pages/templates/index.tsx`: actions 加「复制」按钮 (`CopyOutlined` 走 `TemplatesApi.fork(t.id)`)
+  - `api/mock/engine.ts`: 新增 `forkTemplate(srcId)` 复刻后端 clone 逻辑
+  - `api/mock/index.ts`: 改 `GET/POST /api/settings/llm` 返 `available: !!api_key`(让 Gap 2 mock 模式也不假); 新增 `POST /api/settings/llm/test` mock(用 'wrong' 模拟 401); 新增 `POST /api/templates/{id}/fork` mock 路由; **Gap 5** `/api/chat/reply` 有 apiKey 时优先 fetch 真后端, 失败回落 `callDirectChatReply` → mock
+
+**E2E 验证** (backend 8001 + sidecar 8002 启):
+- `POST /api/templates/tpl-article-simple/fork` → 返 `id=tpl-11104055 name=文章框架制作(简版) · 副本 builtin=False v=1` ✅
+- `POST /api/settings/llm/test` 假 key `sk-wrong1234567890` → 返 `{"ok":false,"available":false,"error":"probe failed: error, status code: 401, status: 401 Unauthorized, ... Your api key: ****7890 is invalid"}` ✅ (真探到 deepseek 401)
+- `POST /api/settings/llm/test` 空 key → 返 `{"ok":false,"available":false,"error":"API key 为空"}` ✅ (无网络请求)
+
+**全替决策**:
+- `/api/settings/llm/test` 8s 显式 timeout: 用户填错 key 不能卡 UI
+- `Provider.Probe` 走 Generate 发最小 chat (system "ping" 单条), eino-ext 自带 HTTP client, 401/超时/网络错都透出
+- 不在单测里跑真网络(只测 Unavailable/参数), E2E 手工验证
+
+**修改文件**:后端 6 文件 (provider.go + openai.go + settings.go + templates.go + provider_test.go + 3 mock provider 补 Probe) + 前端 8 文件 (settings.ts + templates.ts + useAppStore.ts + settings/index.tsx + templates/edit.tsx + templates/index.tsx + mock/engine.ts + mock/index.ts) = 14 个文件
+
+**后续若要做** (已从 TODO.md 移出, 不再 backlog):
+- 边 condition 谓词编辑 (P1) — 模板编辑器"分支"能力
+- 节点输入快照渲染 (P1) — `StepHistoryItem.before_snapshot` 已存, 纯前端展示
+- `useTasksStore` 改 EventSource (P2) — `/tasks/:id` 2s 轮询替换
+- Vitest + Playwright (P4) — 真 LLM 接入后无单测保护
+- 模板 KB 上传补全 DOCX/TXT
+- 任务流 verify_reference 接 PubMed
+
 ### 2026-08-14 · 阶段 5 续 5 P85 · PDF 内嵌图片提取
 
 **背景**:Qwen-VL OCR 抽文本时, 文档里的真实 jpg/png 图被压平成 caption, 原文图片丢失。 用户问"为什么不见了" → 加 pdfcpu 抽 embedded images。

@@ -27,6 +27,7 @@ import {
 } from '@ant-design/icons';
 import { useState } from 'react';
 import { useAppStore, providerPresets, type ProviderType, type ModelConfig } from '../../store/useAppStore';
+import { testLlmConnection } from '../../api/settings';
 
 const { Title, Text, Paragraph } = Typography;
 const { Option } = Select;
@@ -90,16 +91,37 @@ function ModelSection() {
     });
   };
 
-  const testConnection = (config: ModelConfig) => {
+  const testConnection = async (config: ModelConfig) => {
     if (!config.apiKey) {
       message.warning('请先填写 API Key');
       return;
     }
-    // TODO: 后端测试接口
-    message.loading({ content: '正在测试连接…', key: 'test' });
-    setTimeout(() => {
-      message.success({ content: `${config.name} 连接成功`, key: 'test' });
-    }, 800);
+    message.loading({ content: `正在测试 ${config.name} 连接…`, key: 'test', duration: 0 });
+    try {
+      const res = await testLlmConnection({
+        provider: config.provider,
+        model: config.model,
+        api_key: config.apiKey,
+        base_url: config.baseURL,
+        temperature: config.temperature,
+      });
+      if (res.ok && res.available) {
+        message.success({
+          content: `${config.name} 连接成功 (${res.name ?? 'LLM'})`,
+          key: 'test',
+        });
+      } else {
+        message.error({
+          content: `${config.name} 连接失败: ${res.error ?? '未知错误'}`,
+          key: 'test',
+        });
+      }
+    } catch (e) {
+      message.error({
+        content: `${config.name} 测试异常: ${(e as Error).message}`,
+        key: 'test',
+      });
+    }
   };
 
   const activeConfig = modelConfigs.find(c => c.id === activeConfigId);
@@ -199,7 +221,7 @@ function ModelSection() {
             <Text type="warning">未选择任何配置,使用 fallback mock</Text>
           )}
           <Text type="secondary" style={{ fontSize: 12 }}>
-            当前配置用于所有未单独指定模型的 Agent。切换后立即生效并存 localStorage。
+            当前配置用于所有未单独指定模型的 Agent。切换后立即生效,并通过 PUT /api/settings/llm_prefs 持久化到后端 (SQLite settings 表, key=llm_prefs)。
           </Text>
         </Space>
       </Card>

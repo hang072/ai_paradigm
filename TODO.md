@@ -37,7 +37,8 @@ S1–S4 + 阶段 1-5 全部完成,后端位于 `backend/`。
 - [ ] 节点**输入**快照渲染:后端 `StepHistoryItem.before_snapshot` 已写入,前端需新增"diff 上次"对比区,展示进入该节点时的 state vs 离开时的 state(`backend/internal/engine/artifact_writer.go` + `snapshots.go:shallowSnapshot` 是数据源)
 
 ### 知识库增强
-- [ ] 文件上传:PDF / DOCX / TXT → 转 Markdown 并入库
+- [x] ✅ 文件上传:PDF → PyMuPDF sidecar 抽文本/图/表 → Markdown 入库(P91 2026-08-14,抽图率 100% 41/41,1-2.5s/份;DOCX/TXT 仍走旧 ledongthuc 路径)
+- [x] ✅ 抽出 PDF 内嵌图片:PyMuPDF + vite `/api` proxy + 404 兜底页(P91 2026-08-14;真实样本 5 页医学 PDF 抽 2 张 11.4KB+18.9KB,vector PDF 抽不到的页返 404 符合预期)
 - [ ] chunk + embedding 层(目前是关键字匹配,接 Eino 后可换 vector search)
 - [ ] 检索结果高亮命中关键字(目前只截片段,前端不展示 `<mark>` 高亮)
 - [ ] `litSource` 在任务流 verify_reference 链路补齐(目前 chat 路径已用真 PubMed,任务流 `retrieveCitationSources` 只接 search,verify 还没接)
@@ -85,13 +86,31 @@ S1–S4 + 阶段 1-5 全部完成,后端位于 `backend/`。
 
 ---
 
+## ✅ 阶段 5 续 5 · P91 收口(2026-08-14)
+
+**目标**: PDF 解析 + 抽图统一走 PyMuPDF Python sidecar,替代 P85 pdfcpu(0% 抽图率)+ Qwen-VL OCR(30-60s/PDF)双路径。
+
+**交付**:
+- [x] ✅ 新 sidecar `backend/sidecars/pymupdf-extract/`(FastAPI + uvicorn + pymupdf4llm 0.0.18 + pymupdf 1.24.10)
+- [x] ✅ Go 客户端 `internal/embedding/pymupdf.go` + 启动时 `/health` fail-fast
+- [x] ✅ 新 parser `internal/parser/pymupdf_parser.go` 替代 ledongthuc 旧路径
+- [x] ✅ `embedding.PersistImages` 落盘到 `data/kb_images/{kb}/{doc}/image_NNN.{ext}`
+- [x] ✅ 删旧 `internal/kbimages` 包 + pdfcpu 依赖
+- [x] ✅ docker-compose 加 `pymupdf-sidecar` + 可选 `backend` service + `Dockerfile` multi-stage
+- [x] ✅ vite proxy `/api → :8001` + router 404 友好页(用户地址栏直输场景)
+- [x] ✅ 13 个测试: 12 unit (`TestPersistImages_*` 6 + `TestKbImages_*` 6) + 1 e2e (`TestPymupdfE2E`),全绿 11.9s
+
+**验证**: 5 页医学 PDF "发发发" KB `kb-2f695723` / doc `doc-55bec705` 抽 2 张 PNG(image_001=11.4KB page 2 / image_002=18.9KB page 4),`GET /api/kb/.../images/...` 200 + `image/png`,vector 页 404 符合预期。详见 PROGRESS.md / CLAUDE.md / `backend/README.md` "P91" 节。
+
+---
+
 ## 🐛 已知小 gap
 
-- [ ] `pages/settings/index.tsx:202` 文案 "存 localStorage" 与后端持久化事实不符,改为 "存后端(SQLite `llm_prefs`)"
-- [ ] `pages/settings/index.tsx:98` 「测试连接」按钮是假成功(`// TODO: 后端测试接口`),应实际 POST `/api/settings/llm` 拿 `available` 状态
-- [ ] 首页「今日待办」的跳转链接只到 `/tasks`,未定位到具体 task(`/tasks/:id`)
-- [ ] `pages/templates/index.tsx` 卡片「复制」按钮尚未实装(「编辑」按钮已跳 `/templates/:id/edit`,但没有"另存为新模板"流程,目前要走编辑器 fork)
-- [ ] mock 引擎 `/api/chat/reply` 在用户填了 `useAppStore.apiKey` 时直接调 LLM,没有用真后端 `/api/chat/reply` 端点(可选:统一走后端,便于日志/速率限制)
+- [x] ✅ `pages/settings/index.tsx` 文案:已改为"持久化到后端 (SQLite settings 表, key=llm_prefs)"(P92 2026-08-14)
+- [x] ✅ 「测试连接」按钮:真连通性探测,走后端 `POST /api/settings/llm/test` (8s timeout),返 `available=true` 时弹成功,401/超时弹 `error` 原文(P92 2026-08-14)
+- [x] ✅ 「今日待办」跳转:已修,workbench 链接 `/tasks/${t.thread_id}`(本次 P92 调研发现早已修)
+- [x] ✅ 模板卡片「复制」:加 `<CopyOutlined>` 按钮,走后端 `POST /api/templates/{id}/fork`,立刻 message.success + 刷新列表。同时修复了"编辑 builtin 模板 fork 后保存 404" 的真 bug — performSave 改走 fork→update 路径(P92 2026-08-14)
+- [x] ✅ mock `/api/chat/reply` 有 key 时:优先 fetch 真后端 `/api/chat/reply`,失败回落 `callDirectChatReply` → mock;让真后端拿到所有 chat trace(日志/限速/审计)(P92 2026-08-14)
 
 ---
 

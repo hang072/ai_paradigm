@@ -64,8 +64,11 @@ function newInstanceId(defId: string, existing: NodeInstance[]): string {
   return `${defId}_${Date.now().toString(36)}`;
 }
 
-/** fork 内置模板:克隆但去掉 builtin、生成新 id。 */
-function forkTemplate(src: WorkflowTemplate): WorkflowTemplate {
+/** fork 内置模板:克隆但去掉 builtin、生成新 id。
+ * P92: 该函数仍用于编辑器内"加载 builtin 时立即 fork 出可编辑副本",让用户看到新 id。
+ * 真正的"保存 = 后端克隆 + 写 v1"改走 TemplatesApi.fork(srcBuiltinId),见 performSave。
+ */
+export function forkTemplate(src: WorkflowTemplate): WorkflowTemplate {
   return {
     ...src,
     id: `tpl-${Math.random().toString(36).slice(2, 10)}`,
@@ -462,6 +465,9 @@ export default function TemplateEditorPage() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  // P92: 若当前 tpl 是从 builtin fork 来的,记录源 builtin id,保存时走后端 /fork 端点
+  // (避免本地新 id 走 PUT 后端 404)。null = 非 fork 编辑。
+  const [srcBuiltinId, setSrcBuiltinId] = useState<string | null>(null);
   // 阶段 2:validation issues 实时计算(节点/边变时重新跑)
   const [validationIssues, setValidationIssues] = useState<
     ReturnType<typeof validateTemplate>
@@ -492,8 +498,14 @@ export default function TemplateEditorPage() {
     }
     TemplatesApi.get(id!)
       .then((src) => {
-        // 内置模板进入时直接 fork,避免后端 PUT 拒 400
-        setTpl(src.builtin ? forkTemplate(src) : { ...src });
+        if (src.builtin) {
+          // P92: 记录源 builtin id,保存时走后端 /fork 端点(本地新 id PUT 后端 404)
+          setSrcBuiltinId(src.id);
+          setTpl(forkTemplate(src));
+        } else {
+          setSrcBuiltinId(null);
+          setTpl({ ...src });
+        }
       })
       .catch((e) => ctxMessage.error(e.message))
       .finally(() => setLoading(false));
@@ -652,7 +664,28 @@ export default function TemplateEditorPage() {
         edges: tpl.edges.map(({ from, to, port }) => ({ from, to, port })),
       };
       let saved: WorkflowTemplate;
-      if (isNew || !tpl.id) {
+      if (srcBuiltinId) {
+        // P92: 编辑 builtin 模板。1) 后端 fork 拿真新 id + v1
+        //     2) 把当前 form 改动 update 到这个新 id(走原 update 逻辑)
+        //     3) 后续再保存就是普通 PUT(无需再 fork)
+        const forked = await TemplatesApi.fork(srcBuiltinId);
+        // payload 覆盖 fork 出来的元数据(name/builtin/description 跟随用户当前编辑)
+        const target: WorkflowTemplate = {
+          ...forked,
+          name: payload.name,
+          description: payload.description,
+          tags: payload.tags,
+          entry: payload.entry,
+          nodes: payload.nodes,
+          edges: payload.edges,
+          parameter_schema: payload.parameter_schema,
+          description_required_inputs: payload.description_required_inputs,
+        };
+        saved = await TemplatesApi.update(forked.id, target);
+        // 清掉 srcBuiltinId: 之后这个 tpl.id 就是真后端 id,直接 update
+        setSrcBuiltinId(null);
+        setTpl((prev) => (prev ? { ...prev, id: saved.id, builtin: false } : prev));
+      } else if (isNew || !tpl.id) {
         saved = await TemplatesApi.create({
           name: payload.name,
           description: payload.description,

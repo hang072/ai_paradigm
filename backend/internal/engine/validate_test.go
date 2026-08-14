@@ -35,6 +35,7 @@ func (m *mockProvider) Complete(_ context.Context, msgs []*schema.Message) (*sch
 
 func (m *mockProvider) Available() bool { return true }
 func (m *mockProvider) Name() string    { return "mock" }
+func (m *mockProvider) Probe(_ context.Context) error { return nil }
 
 // Stream 把当前回放项作为单帧流返回,行为与 Complete 一致(测试够用)。
 func (m *mockProvider) Stream(_ context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {

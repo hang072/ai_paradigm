@@ -106,6 +106,48 @@ func mountTemplates(
 		respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 
+	// POST /api/templates/{id}/fork —— 克隆源模板为新副本(builtin→普通)。
+	// 用于前端"编辑 builtin 模板"路径: 旧实现是 forkTemplate() 前端克隆 + PUT 新 id
+	// (后端 404),现在走后端 1 次调用就拿到新建好的副本 + 自动写 v1。
+	r.Post("/templates/{id}/fork", func(w http.ResponseWriter, r2 *http.Request) {
+		srcID := chi.URLParam(r2, "id")
+		src, ok := s.Get(srcID)
+		if !ok {
+			respondErr(w, http.StatusNotFound, "源 Template 不存在")
+			return
+		}
+		// 浅拷 + 深拷切片 / map,builtin 必为 false
+		fork := *src
+		fork.ID = "" // 让 store.Create 生成新 id
+		fork.Name = src.Name + " · 副本"
+		fork.Builtin = false
+		fork.CurrentVersion = 1
+		fork.Versions = []int{1}
+		fork.Nodes = append([]domain.NodeInstance(nil), src.Nodes...)
+		fork.Edges = append([]domain.EdgeInstance(nil), src.Edges...)
+		fork.Tags = append([]string(nil), src.Tags...)
+		if src.ParameterSchema != nil {
+			ps := make(map[string]domain.ParameterSchemaEntry, len(src.ParameterSchema))
+			for k, v := range src.ParameterSchema {
+				// 临时变量拷贝 v,避免改 map 值内部字段
+				entry := v
+				if v.EnumValues != nil {
+					entry.EnumValues = append([]string(nil), v.EnumValues...)
+				}
+				ps[k] = entry
+			}
+			fork.ParameterSchema = ps
+		}
+		if src.DescriptionRequiredInputs != nil {
+			fork.DescriptionRequiredInputs = append([]string(nil), src.DescriptionRequiredInputs...)
+		}
+		created := s.Create(&fork)
+		if versions != nil {
+			_, _ = versions.SaveVersion(created)
+		}
+		respondJSON(w, http.StatusOK, created)
+	})
+
 	// ===== 阶段 2.4 版本历史端点 =====
 	if versions != nil {
 		r.Get("/templates/{id}/versions", func(w http.ResponseWriter, r2 *http.Request) {

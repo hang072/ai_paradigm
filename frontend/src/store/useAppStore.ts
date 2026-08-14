@@ -20,6 +20,8 @@ export interface ModelConfig {
   apiKey: string;
   baseURL: string;
   runtime?: '云端' | '本地 Mac mini';
+  /** P92: 测连接时透传给后端 /api/settings/llm/test,缺省 0.7 (与后端 env 默认一致) */
+  temperature?: number;
 }
 
 interface AppState {
