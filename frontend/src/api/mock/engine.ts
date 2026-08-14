@@ -182,11 +182,22 @@ export function getAgent(id: string): AgentDef | undefined {
   return agents.get(id);
 }
 export function createAgent(input: Partial<AgentDef> & { name: string }): AgentDef {
+  // 阶段 1:对齐后端 domain.AgentDef.Normalize() —— 把所有 nil 切片/map 补成
+  // 非 nil 空值,避免下游 .Tools.length / .Methodology.length 断言 nil 时炸。
   const a: AgentDef = {
     id: input.id ?? 'agent-' + nanoid(8),
     name: input.name,
     description: input.description ?? '',
+    persona: input.persona ?? '',
     system_prompt: input.system_prompt ?? '',
+    methodology: input.methodology ?? [],
+    output_schema: input.output_schema ?? {},
+    guardrails: input.guardrails ?? {
+      no_fabricate: false,
+      require_citations: false,
+      escalate_to: [],
+      red_lines: [],
+    },
     tools: input.tools ?? [],
     llm_model: input.llm_model ?? 'default',
     recursion_limit: input.recursion_limit ?? 40,
@@ -252,6 +263,9 @@ export function getTemplate(id: string): WorkflowTemplate | undefined {
   return templates.get(id);
 }
 export function createTemplate(input: Partial<WorkflowTemplate> & { name: string }): WorkflowTemplate {
+  // 阶段 2:parameter_schema / description_required_inputs 都要默认值,与后端
+  // domain.WorkflowTemplate.Normalize() 对齐。前端 mock 不存历史版本,直接
+  // current_version=1。
   const t: WorkflowTemplate = {
     id: input.id ?? 'tpl-' + nanoid(8),
     name: input.name,
@@ -261,6 +275,10 @@ export function createTemplate(input: Partial<WorkflowTemplate> & { name: string
     nodes: input.nodes ?? [],
     edges: input.edges ?? [],
     builtin: false,
+    parameter_schema: input.parameter_schema ?? {},
+    description_required_inputs: input.description_required_inputs ?? [],
+    current_version: 1,
+    versions: [1],
   };
   templates.set(t.id, t);
   return t;
@@ -269,7 +287,18 @@ export function updateTemplate(id: string, patch: Partial<WorkflowTemplate>): Wo
   const cur = templates.get(id);
   if (!cur) throw new Error('template not found');
   if (cur.builtin) throw new Error('内置模板不可修改');
-  const next = { ...cur, ...patch, id: cur.id, builtin: false };
+  // 阶段 2.4:mock 不存历史表,前端假装 +1 + 追加 versions。真实后端会
+  // 走 template_versions 表。
+  const prevVersions = cur.versions ?? [cur.current_version ?? 1];
+  const nextVersion = (cur.current_version ?? prevVersions[0] ?? 0) + 1;
+  const next: WorkflowTemplate = {
+    ...cur,
+    ...patch,
+    id: cur.id,
+    builtin: false,
+    current_version: nextVersion,
+    versions: [...prevVersions, nextVersion],
+  };
   templates.set(id, next);
   return next;
 }
@@ -277,6 +306,25 @@ export function deleteTemplate(id: string) {
   const cur = templates.get(id);
   if (cur?.builtin) throw new Error('内置模板不可删除');
   templates.delete(id);
+}
+
+/**
+ * 阶段 3.3:mock 引擎的 Planner 兜底。
+ * 浏览器没 LLM → 永远走 static 模式 + tpl-full 兜底。等同于老 chat 团队路径。
+ * 真实后端会返回 dynamic + spec(若 LLM 可用 + 校验通过)。
+ */
+export function composePlanner(input: { brief: string; task_type?: string }): {
+  mode: 'static';
+  fallback_template_id: string;
+  reason: string;
+  latency_ms: number;
+} {
+  return {
+    mode: 'static',
+    fallback_template_id: 'tpl-full',
+    reason: 'mock 引擎无 LLM,回退 tpl-full(真实后端可走 dynamic)',
+    latency_ms: 0,
+  };
 }
 
 /* ============ Task 状态机 ============ */
@@ -469,7 +517,7 @@ function stepParseBrief(id: string) {
   }
 }
 
-function stepPlanStrategy(id: string) {
+function stepPlanStrategy(id: string, feedback?: string) {
   const t = tasks.get(id);
   if (!t) return;
   t.strategy_doc =
@@ -491,7 +539,7 @@ function stepPlanStrategy(id: string) {
   pushStep(t, 'confirm_strategy', []);
 }
 
-function stepBuildFramework(id: string) {
+function stepBuildFramework(id: string, feedback?: string) {
   const t = tasks.get(id);
   if (!t) return;
   t.framework_skeleton = {
@@ -547,6 +595,17 @@ function stepReviewQuality(id: string) {
   let overall: ReviewReport['overall'] = 'pass';
   if (t.revision_count === 0 && Math.random() < 0.4) overall = 'revise';
 
+  // 阶段 6 workbuddy 借鉴:智能路由 target_node
+  // 模拟 reviewer 根据 fail 维度选 target_node:有 30% 概率路由到 plan_strategy
+  // (策略问题),有 20% 概率路由到 build_framework(骨架问题),其余 50% 走默认 enrich_content
+  let targetNode: ReviewReport['target_node'] = '';
+  if (overall === 'revise') {
+    const r = Math.random();
+    if (r < 0.3) targetNode = 'plan_strategy';
+    else if (r < 0.5) targetNode = 'build_framework';
+    else targetNode = 'enrich_content';
+  }
+
   t.review_report = {
     overall,
     strategy_items: [
@@ -565,20 +624,57 @@ function stepReviewQuality(id: string) {
       overall === 'pass'
         ? []
         : ['补充第二章关键 RCT 的原始文献引用', '第三章加入用药监测节点表格'],
+    target_node: targetNode,
   };
-  t.messages.push(`[review_quality] verdict=${overall}`);
+  t.messages.push(`[review_quality] verdict=${overall}, target_node=${targetNode || 'enrich_content'}`);
   pushStep(t, 'review_quality', ['review_report']);
 
   if (overall === 'pass') {
     scheduleAdvance(id, 400, () => interruptHumanFinal(id));
   } else if (t.revision_count < 2) {
-    t.revision_count += 1;
-    t.messages.push(`[route_after_review] 触发修订回路,revision=${t.revision_count}`);
-    pushStep(t, 'bump_revision', ['revision_count']);
-    scheduleAdvance(id, 600, () => stepEnrichContent(id, t.review_report?.advices.join('; ') ?? ''));
+    routeAfterReview(id, targetNode);
   } else {
     t.messages.push('[route_after_review] 达到最大修订次数,强制通过');
     scheduleAdvance(id, 400, () => interruptHumanFinal(id));
+  }
+}
+
+/**
+ * 阶段 6:智能路由分发函数。根据 review_report.target_node 决定下一个 step。
+ * (从 stepReviewQuality 抽出,避免堆 if/else)
+ */
+function routeAfterReview(id: string, targetNode: ReviewReport['target_node']) {
+  const t = tasks.get(id);
+  if (!t) return;
+  t.revision_count += 1;
+  t.messages.push(`[route_after_review] target_node=${targetNode || 'enrich_content'}, revision=${t.revision_count}`);
+  pushStep(t, 'bump_revision', ['revision_count']);
+
+  const advices = t.review_report?.advices.join('; ') ?? '';
+
+  switch (targetNode) {
+    case 'plan_strategy':
+      // 回策略规划:模拟 reviewer 报告"策略问题"
+      scheduleAdvance(id, 500, () => {
+        t.messages.push('[route_after_review] 智能路由 → plan_strategy');
+        stepPlanStrategy(id, `智能路由: ${advices}`);
+      });
+      return;
+    case 'build_framework':
+      // 回框架搭建:模拟 reviewer 报告"骨架问题"
+      scheduleAdvance(id, 500, () => {
+        t.messages.push('[route_after_review] 智能路由 → build_framework');
+        stepBuildFramework(id, `智能路由: ${advices}`);
+      });
+      return;
+    case 'human_final':
+      scheduleAdvance(id, 400, () => interruptHumanFinal(id));
+      return;
+    case 'enrich_content':
+    case '':
+    default:
+      scheduleAdvance(id, 600, () => stepEnrichContent(id, advices));
+      return;
   }
 }
 
@@ -797,7 +893,9 @@ export function searchKb(query: string, kbIds: string[] = []): KbSearchHit[] {
         kb_name: kb.name,
         doc_id: doc.id,
         doc_title: doc.title,
+        chunk_id: `${doc.id}:0`, // mock 模式只回 1 个 chunk
         snippet,
+        location: 'mock 命中位置', // 占位,前端 UI 兼容
         score,
         url: doc.url,
       });

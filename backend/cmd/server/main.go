@@ -21,9 +21,12 @@ import (
 import (
 	"paradigm_eino_backend/internal/api"
 	"paradigm_eino_backend/internal/domain"
+	"paradigm_eino_backend/internal/embedding"
 	"paradigm_eino_backend/internal/engine"
 	"paradigm_eino_backend/internal/fixtures"
 	"paradigm_eino_backend/internal/llm"
+	"paradigm_eino_backend/internal/parser"
+	"paradigm_eino_backend/internal/planner"
 	"paradigm_eino_backend/internal/pubmed"
 	"paradigm_eino_backend/internal/store"
 	sqlitestore "paradigm_eino_backend/internal/store/sqlite"
@@ -59,10 +62,60 @@ func main() {
 		func() *domain.NodeDef { return &domain.NodeDef{} })
 	templateStore := sqlitestore.NewEntities[*domain.WorkflowTemplate](db, "template", domain.IDPrefixTemplate,
 		func() *domain.WorkflowTemplate { return &domain.WorkflowTemplate{} })
+	// 阶段 2.4:模板版本历史 store,模板 PUT 时建新行
+	templateVersions := sqlitestore.NewTemplateVersions(db)
 	skillStore := sqlitestore.NewEntities[*domain.SkillDef](db, "skill", domain.IDPrefixSkill,
 		func() *domain.SkillDef { return &domain.SkillDef{} })
 	kbStore := sqlitestore.NewEntities[*domain.KnowledgeBase](db, "kb", domain.IDPrefixKB,
 		func() *domain.KnowledgeBase { return &domain.KnowledgeBase{} })
+
+	// 阶段 5:KB 文档上传 BLOB 存储
+	kbUploads := sqlitestore.NewKbUploads(db)
+	// 阶段 5 续 2:分片上传 session 存储 + 24h TTL 后台 sweeper
+	uploadSessions := sqlitestore.NewUploadSessions(db)
+	go runUploadSessionSweeper(uploadSessions)
+	// 阶段 5 续 5:文档结构化抽取 sidecar
+	docStructures := sqlitestore.NewDocStructures(db)
+
+	// 阶段 5 续 3:Embedding + 独立 Milvus(都是 hard dep,任一失败 → server 启动失败)
+	// 走 docker-compose 起的 milvus-standalone,默认 localhost:19530
+	milvusAddress := os.Getenv("MILVUS_ADDRESS")
+	if milvusAddress == "" {
+		milvusAddress = "localhost:19530"
+	}
+	embedder, err := embedding.NewOpenAICompatEmbedderFromEnv()
+	if err != nil {
+		log.Fatalf("init embedding: %v", err)
+	}
+	// 阶段 5 续 4: VLM OCR (Qwen-VL) — PDF 上传时抽真实文本(ledongthuc 中文 PDF 抽不到)
+	// 阶段 5 续 5 P80: PDF 渲染改用纯 Go pdfview (built-in), 不再依赖 Poppler / pdftoppm。
+	// soft-dep: 没 LLM_VISION_MODEL 时,parser 自动 fallback 到 ledongthuc(乱码)。
+	if ok, p, msg := parser.CheckPdfview(); ok {
+		log.Printf("pdf render: %s", p)
+	} else {
+		log.Printf("[WARN] pdf render: %s", msg)
+	}
+	visionOCR, err := embedding.NewQwenVLOpenAIOCRFromEnv()
+	if err != nil {
+		log.Printf("[main] vision OCR not available (%v), PDFs will use ledongthuc fallback", err)
+		visionOCR = nil
+	} else {
+		parser.SetVisionOCR(visionOCR)
+		log.Printf("vision ready: model=%s", visionOCR.Model())
+	}
+	milvusCli, err := embedding.NewMilvusClient(milvusAddress, embedder.Dim())
+	if err != nil {
+		log.Fatalf("init milvus: %v", err)
+	}
+	defer milvusCli.Close()
+	jobQ := embedding.NewJobQueue(embedder, milvusCli, kbStore, kbUploads, docStructures)
+	jobQ.Start()
+	defer jobQ.Stop()
+	api.InitEmbedding(embedder, milvusCli, jobQ)
+	// 阶段 5 续 5 P84: 单 doc delete handler 需要直接拿 pkgKbUploads /
+	// pkgDocStructures, 走 package-level 注入(同 InitEmbedding 模式)。
+	api.InitKBStores(kbUploads, docStructures)
+	log.Printf("embedding ready: model=%s dim=%d", embedder.Model(), embedder.Dim())
 
 	for _, a := range fixtures.Agents() {
 		agentStore.Seed(a)
@@ -108,30 +161,63 @@ func main() {
 	pubmedClient := pubmed.NewClient(pubmed.Config{})
 	litSource := pubmed.HitSource{Client: pubmedClient}
 
+	// 阶段 3.1.3:把 agent / KB / PubMed 注入 builtin 节点注册表,
+	// 让 runGenericStep 走通用化路径(不依赖 apply*LLM 的硬编码分支)
+	engine.SetBuiltinSources(agentStore, kbStore, litSource)
+
+	// 阶段 4.6:提前装配 taskArtifacts(供 BuildTaskGraph 用)
+	taskArtifacts := sqlitestore.NewTaskArtifacts(db)
+
 	// 5. 编译 task graph + executor
-	graph, err := engine.BuildTaskGraph(snapshotStore, checkpointStore, llmConfigMgr, agentStore, kbStore, litSource)
+	// 阶段 3:同时支持动态构图(Planner 输出 spec 走 BuildGraphFromSpec)与
+	// 静态兜底(BuildTaskGraph, tpl-full / tpl-slide-simple / tpl-article-simple
+	// 走它,因为老图含 review_branch 等精细逻辑)
+	graph, err := engine.BuildTaskGraph(snapshotStore, checkpointStore, llmConfigMgr, agentStore, kbStore, litSource, taskArtifacts)
 	if err != nil {
 		log.Fatalf("compile task graph: %v", err)
 	}
-	executor := engine.NewExecutor(graph, snapshotStore, checkpointStore, templateStore)
+	dynamicDeps := &engine.DynamicGraphDeps{
+		SnapshotStore:   snapshotStore,
+		CheckPointStore: checkpointStore,
+		ConfigMgr:       llmConfigMgr,
+		AgentStore:      agentStore,
+		KBStore:         kbStore,
+		LitStore:        litSource,
+		TaskArtifacts:   taskArtifacts,
+	}
+	executor := engine.NewExecutorWithDynamic(graph, snapshotStore, checkpointStore, templateStore, dynamicDeps)
 
 	// 6. Chat store
 	chatStore := sqlitestore.NewChat(db)
 
+	// 6.1 Planner(阶段 3.3)
+	plannerSvc := planner.New(llmConfigMgr, planner.Sources{
+		Agents:    agentStore,
+		Nodes:     nodeStore,
+		Templates: templateStore,
+	})
+
 	// 7. 起 chi 路由
 	deps := api.Deps{
-		Agents:       agentStore,
-		Nodes:        nodeStore,
-		Templates:    templateStore,
-		Skills:       skillStore,
-		Knowledge:    kbStore,
-		LLMConfigMgr: llmConfigMgr,
-		Chat:         chatStore,
-		Settings:     settingsStore,
-		Pubmed:       pubmedClient,
+		Agents:           agentStore,
+		Nodes:            nodeStore,
+		Templates:        templateStore,
+		TemplateVersions: templateVersions,
+		Skills:           skillStore,
+		Knowledge:        kbStore,
+		KBUploads:        kbUploads,
+		UploadSessions:   uploadSessions,
+		DocStructures:    docStructures, // 阶段 5 续 5
+		EmbedJobQ:        jobQ, // 阶段 5 续 3: 传 nil → mountReembedRoutes 跳过 → /reembed 返 404
+		LLMConfigMgr:     llmConfigMgr,
+		Chat:             chatStore,
+		Settings:         settingsStore,
+		Pubmed:           pubmedClient,
+		Planner:          plannerSvc,
 		Tasks: api.TasksDeps{
-			Executor: executor,
-			Store:    snapshotStore,
+			Executor:  executor,
+			Store:     snapshotStore,
+			Artifacts: taskArtifacts,
 		},
 	}
 	r := api.NewRouter(deps)
@@ -152,7 +238,18 @@ func main() {
 	log.Printf("  pubmed: available=%v (需 PUBMED_EMAIL)", pubmedClient.Available())
 	log.Printf("  db: %s", dbPath)
 
-	if err := http.ListenAndServe(addr, r); err != nil {
+	// 阶段 5 续 2:用 http.Server 显式设超时。读 10 分钟覆盖 1.3 GiB 上传在慢
+	// 网络上的极端情况;空闲 2 分钟自动释放。写也 10 分钟对齐,handler 里 ctx
+	// 仍是更细的兜底(单 chunk 5 MiB + 60s 解析超时)。
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       10 * time.Minute,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server exited: %v", err)
 	}
 }
@@ -249,4 +346,22 @@ func initLog() {
 	log.SetOutput(multiWriter)
 	log.Printf("=== paradigm_eino server starting at %s ===", time.Now().Format("2006-01-02 15:04:05"))
 	log.Printf("log file: %s", logPath)
+}
+
+// runUploadSessionSweeper 后台 goroutine:每小时扫一次,把所有过期 session
+// (state='open' 且 expires_at < now) 标 aborted 并清 chunks,释放 BLOB。
+// 极端情况 session 可能在 25h 才被清(接受,见 plan "已知折中")。
+func runUploadSessionSweeper(sessions *sqlitestore.UploadSessions) {
+	t := time.NewTicker(1 * time.Hour)
+	defer t.Stop()
+	for range t.C {
+		n, err := sessions.SweepExpired()
+		if err != nil {
+			log.Printf("[upload-sweeper] error: %v", err)
+			continue
+		}
+		if n > 0 {
+			log.Printf("[upload-sweeper] aborted %d expired sessions", n)
+		}
+	}
 }

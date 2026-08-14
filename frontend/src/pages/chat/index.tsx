@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import AgentAvatar from '../../components/AgentAvatar';
+import { useAgentMap } from '../../hooks/useAgentMap';
 import {
   App as AntApp,
   Avatar,
@@ -38,6 +40,7 @@ import { TemplatesApi } from '../../api/templates';
 import { NodesApi } from '../../api/nodes';
 import { ChatApi } from '../../api/chat';
 import { KnowledgeApi } from '../../api/knowledge';
+import { PlannerApi } from '../../api/planner';
 import { TasksApi } from '../../api/tasks';
 import type { AgentDef } from '../../types/agent';
 import type { SkillDef } from '../../types/skill';
@@ -89,20 +92,20 @@ function inferTaskType(templateId: string, message: string): TaskType {
   return '文章';
 }
 
-/** 从 task snapshot 里拿指定 step 对应的 agent 元信息 (name / color)。 */
+/** 从 task snapshot 里拿指定 step 对应的 agent 元信息 (name / color / display_name / avatar)。 */
 function stepToAgentInfo(
   nodeInstanceId: string,
   snap: TaskSnapshot,
   nodesById: Map<string, NodeDef>,
   agentsById: Map<string, AgentDef>,
-): { id: string; name: string; color: string } | null {
+): { id: string; name: string; color: string; display_name?: string; avatar?: string } | null {
   const inst = snap.spec.nodes.find((n) => n.id === nodeInstanceId);
   if (!inst) return null;
   const def = nodesById.get(inst.type);
   if (!def || !def.agent_id) return null;
   const a = agentsById.get(def.agent_id);
   if (!a) return null;
-  return { id: a.id, name: a.name, color: a.color };
+  return { id: a.id, name: a.name, color: a.color, display_name: a.display_name, avatar: a.avatar };
 }
 
 /** 节点 id → 中文步骤名, 用于气泡正文 ("需求解析完成"、"策略确认书已生成" …) */
@@ -382,13 +385,13 @@ export default function ChatPage() {
   const STREAM_NODES = ['enrich_content', 'review_quality'] as const;
 
   // 某流式节点的执行者身份 —— 找该节点绑定的 agent。
-  const streamAgentInfo = (node: string): { id: string; name: string; color: string } | null => {
+  const streamAgentInfo = (node: string): { id: string; name: string; color: string; display_name?: string; avatar?: string } | null => {
     const inst = nodes.find((n) => n.id === node);
     if (!inst?.agent_id) return null;
     const a = agents.find((x) => x.id === inst.agent_id);
-    return a ? { id: a.id, name: a.name, color: a.color } : null;
+    return a ? { id: a.id, name: a.name, color: a.color, display_name: a.display_name, avatar: a.avatar } : null;
   };
-  const MAIN_INFO = { id: 'agent-main', name: '主助手', color: '#6b7a90' };
+  const MAIN_INFO = { id: 'agent-main', name: '主助手', color: '#6b7a90', display_name: '主助手', avatar: '主' };
 
   useEffect(() => {
     // 组件卸载 → 断开所有连接 (SSE abort + poll clear)
@@ -463,7 +466,7 @@ export default function ChatPage() {
         }),
       };
       const content = agentInfo
-        ? `${agentInfo.name} 完成了 **${label}**`
+        ? `${agentInfo.display_name ?? agentInfo.name} 完成了 **${label}**`
         : `**${label}** 已完成`;
       const msg: ChatMessage = {
         ...makeMessage('assistant', content, {
@@ -834,20 +837,59 @@ export default function ChatPage() {
     if (active.attached_expert?.kind === 'team') {
       try {
         if (!active.active_task_id) {
-          // A. 首条消息 → 起任务
+          // A. 首条消息 → 先调 Planner 拿 spec(或回退到模板),再起任务
           const templateId = active.attached_expert.id;
           const teamName =
             templates.find((t) => t.id === templateId)?.name ?? '专家团';
-          const snap = await TasksApi.start({
-            brief: userMsg.content,
-            template_id: templateId,
-            task_type: inferTaskType(templateId, userMsg.content),
-          });
+          const taskType = inferTaskType(templateId, userMsg.content);
+
+          // 阶段 3.4:调 Planner 实时编排
+          let plannerResp: Awaited<ReturnType<typeof PlannerApi.compose>>;
+          try {
+            plannerResp = await PlannerApi.compose({
+              brief: userMsg.content,
+              task_type: taskType,
+              template_hints: [templateId],
+            });
+          } catch (pe: any) {
+            // Planner 端点本身失败 → 老路径(template_id)
+            plannerResp = {
+              mode: 'static',
+              fallback_template_id: templateId,
+              reason: 'Planner 调用失败:' + pe.message,
+              latency_ms: 0,
+            };
+          }
+
+          let snap: TaskSnapshot;
+          let usedSpec: 'dynamic' | 'static' = plannerResp.mode;
+          if (plannerResp.mode === 'dynamic' && plannerResp.spec) {
+            snap = await TasksApi.start({
+              brief: userMsg.content,
+              spec: plannerResp.spec,
+              task_type: taskType,
+            });
+          } else {
+            // static 兜底:用 Planner 指定的 template,或当前 attached
+            const tplId =
+              plannerResp.fallback_template_id || templateId;
+            snap = await TasksApi.start({
+              brief: userMsg.content,
+              template_id: tplId,
+              task_type: taskType,
+            });
+          }
           await updateSession(active.id, { active_task_id: snap.thread_id });
+
+          // 任务启动气泡 — 把 Planner 决定也展示给用户
+          const plannerNote =
+            usedSpec === 'dynamic'
+              ? `Planner 实时编排了 ${plannerResp.spec?.nodes?.length ?? 0} 个节点`
+              : `Planner 不可用,沿用模板 ${plannerResp.fallback_template_id}(${plannerResp.reason ?? ''})`;
           const startMsg: ChatMessage = {
             ...makeMessage(
               'assistant',
-              `已把需求交给「${teamName}」,任务已启动。稍后我会同步各专家的产出。`,
+              `已把需求交给「${teamName}」,任务已启动。${plannerNote}。稍后我会同步各专家的产出。`,
               {
                 agent_id: 'agent-main',
                 agent_name: '主助手',
@@ -855,7 +897,11 @@ export default function ChatPage() {
                 tool_calls: [
                   {
                     tool: 'task_start',
-                    input: { template_id: templateId, task_id: snap.thread_id },
+                    input: {
+                      template_id: templateId,
+                      planner_mode: usedSpec,
+                      task_id: snap.thread_id,
+                    },
                     output_preview: `任务 ${snap.thread_id} 已排队`,
                   },
                 ],
@@ -1239,7 +1285,8 @@ function SessionListPane(props: {
               let expColor = 'default';
               if (exp) {
                 if (exp.kind === 'agent') {
-                  expLabel = agentMap.get(exp.id)?.name ?? '专家';
+                  const ag = agentMap.get(exp.id);
+                  expLabel = ag?.display_name ?? ag?.name ?? '专家';
                   expColor = 'blue';
                 } else {
                   expLabel = templateMap.get(exp.id)?.name ?? '专家团';
@@ -1437,7 +1484,13 @@ function MessageBubble({ msg }: { msg: import('../../types/chat').ChatMessage })
   const isUser = msg.role === 'user';
   // 助手气泡统一用主助手颜色 —— 子智能体调用在 tool_calls 折叠块里体现
   const color = isUser ? '#2b57d6' : msg.agent_color ?? MAIN_AVATAR_COLOR;
-  const displayName = isUser ? '我' : msg.agent_name ?? '主助手';
+  // displayName 优先 agent_display_name(若有,后端 chat 走 getAgent 实时填;无则落回 agent_name)
+  const rawName = isUser ? '我' : msg.agent_name ?? '主助手';
+  // 阶段 6:displayName/avatar 从 agents store 实时拉(chat 路径不存盘,选 B)
+  const agentMap = useAgentMap();
+  const liveAgent = !isUser && msg.agent_id ? agentMap.get(msg.agent_id) : undefined;
+  const displayName = liveAgent?.display_name ?? rawName;
+  const avatar = liveAgent?.avatar;
 
   // 拆分工具调用:带 agent_id 的是"子智能体调用",否则是普通工具
   const subInvocations = (msg.tool_calls ?? []).filter((tc) => !!tc.agent_id);
@@ -1452,11 +1505,19 @@ function MessageBubble({ msg }: { msg: import('../../types/chat').ChatMessage })
         flexDirection: isUser ? 'row-reverse' : 'row',
       }}
     >
-      <Avatar
-        style={{ background: color, flexShrink: 0 }}
-        icon={isUser ? <span>我</span> : <RobotOutlined />}
-        size={32}
-      />
+      {isUser ? (
+        <Avatar style={{ background: color, flexShrink: 0 }} size={32}>
+          我
+        </Avatar>
+      ) : (
+        <AgentAvatar
+          agent={liveAgent}
+          name={msg.agent_name}
+          color={color}
+          size={32}
+          style={{ flexShrink: 0 }}
+        />
+      )}
       <div style={{ maxWidth: '78%', minWidth: 0 }}>
         <div
           style={{
@@ -1530,6 +1591,11 @@ function SubInvocationBlock({ tc }: { tc: ToolCallTrace }) {
   const [open, setOpen] = useState(false);
   const agentColor = tc.agent_color ?? '#7c4dff';
   const agentName = tc.agent_name ?? '子智能体';
+  // 阶段 6:从 agents 实时拉 display_name + avatar
+  const agentMap = useAgentMap();
+  const liveAgent = tc.agent_id ? agentMap.get(tc.agent_id) : undefined;
+  const displayName = liveAgent?.display_name ?? agentName;
+  const avatar = liveAgent?.avatar;
   return (
     <div
       style={{
@@ -1557,8 +1623,15 @@ function SubInvocationBlock({ tc }: { tc: ToolCallTrace }) {
           rotate={open ? 90 : 0}
           style={{ fontSize: 10, color: agentColor, transition: 'transform 0.15s' }}
         />
-        <span style={{ fontSize: 14 }}>🧩</span>
-        <span style={{ fontWeight: 600, color: agentColor }}>调用了 {agentName}</span>
+        <AgentAvatar
+          agent={liveAgent}
+          agentId={tc.agent_id}
+          agentMap={agentMap}
+          name={agentName}
+          color={agentColor}
+          size={18}
+        />
+        <span style={{ fontWeight: 600, color: agentColor }}>调用了 {displayName}</span>
         {!open && (
           <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
             点击展开发言
@@ -1754,16 +1827,8 @@ function ConfigPane({
                   value: encodeExpertValue({ kind: 'agent', id: a.id }),
                   label: (
                     <Space>
-                      <span
-                        style={{
-                          display: 'inline-block',
-                          width: 8,
-                          height: 8,
-                          borderRadius: '50%',
-                          background: a.color,
-                        }}
-                      />
-                      {a.name}
+                      <AgentAvatar agent={a} size={20} />
+                      <span>{a.display_name ?? a.name}</span>
                     </Space>
                   ),
                 })),
@@ -1832,18 +1897,9 @@ function ConfigPane({
                     }}
                   >
                     {teamAgents.map((a) => (
-                      <li key={a.id} style={{ marginTop: 2 }}>
-                        <span
-                          style={{
-                            display: 'inline-block',
-                            width: 6,
-                            height: 6,
-                            borderRadius: '50%',
-                            background: a.color,
-                            marginRight: 4,
-                          }}
-                        />
-                        {a.name}
+                      <li key={a.id} style={{ marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <AgentAvatar agent={a} size={16} />
+                        <span>{a.display_name ?? a.name}</span>
                       </li>
                     ))}
                   </ol>

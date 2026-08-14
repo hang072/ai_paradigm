@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   App as AntApp,
-  Avatar,
   Button,
   Card,
   Col,
@@ -16,9 +15,10 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { DeleteOutlined, EditOutlined, PlusOutlined, RobotOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { AgentsApi } from '../../api/agents';
 import type { AgentDef } from '../../types/agent';
+import AgentAvatar from '../../components/AgentAvatar';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -157,13 +157,9 @@ export default function AgentsPage() {
                 ]}
               >
                 <div className="flex items-center gap-12">
-                  <Avatar
-                    style={{ background: a.color }}
-                    icon={<RobotOutlined />}
-                    size={44}
-                  />
+                  <AgentAvatar agent={a} size={44} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 15 }}>{a.name}</div>
+                    <div style={{ fontWeight: 600, fontSize: 15 }}>{a.display_name ?? a.name}</div>
                     <Space size={4} style={{ marginTop: 4 }}>
                       {a.builtin && <Tag color="blue">内置</Tag>}
                       <Tag>{a.runtime ?? '云端'}</Tag>
@@ -239,6 +235,18 @@ export default function AgentsPage() {
           <Form.Item label="简介 (Brief Subtitle)" name="description">
             <Input placeholder="一句话描述该智能体做什么" />
           </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="展示名 (Display Name)" name="display_name" tooltip="拟人化中文花名,如「许清楚 · 需求澄清官」;留空则用 Name">
+                <Input placeholder="例:许清楚 · 需求澄清官" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="头像 (Avatar)" name="avatar" tooltip="1-4 字符 emoji 或中英文字符;也支持 http(s)/data URL">
+                <Input placeholder="例:👂" maxLength={4} />
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item label="核心系统 Prompt (System Instruction)" name="system_prompt">
             <TextArea rows={8} placeholder="你是一个……" />
           </Form.Item>

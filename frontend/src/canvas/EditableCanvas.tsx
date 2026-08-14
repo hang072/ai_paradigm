@@ -69,7 +69,7 @@ export function EditableCanvas(props: EditableCanvasProps) {
         label: (inst as any).label ?? def?.name ?? inst.type,
         kind: def?.kind ?? 'compute',
         color: def?.color ?? '#2b57d6',
-        agentName: agent?.name,
+        agentName: agent?.display_name ?? agent?.name,
         outPorts: def?.out_ports ?? ['next'],
         state: isEntry ? 'current' : 'pending',
       };

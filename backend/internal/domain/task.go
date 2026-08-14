@@ -44,11 +44,21 @@ type PendingInterrupt struct {
 }
 
 // StepHistoryItem 一步节点执行记录。
+//
+// 阶段 4(2026-08-11)扩展:加 BeforeSnapshot/AfterSnapshot 字段,各自由该节点
+// 入口前 / 出口后的 TaskSnapshot 序列化。供前端 diff 节点前后的状态变化。
+// 数据量可能较大(markdown 正文 100KB+),所以在 step_history 里只是引用 +
+// 关键字段,完整 snapshot 还是通过 GET /api/tasks/:id 取。
 type StepHistoryItem struct {
 	Step      int      `json:"step"`
 	NodeID    string   `json:"node_id"`
 	AfterKeys []string `json:"after_keys"`
 	Skipped   bool     `json:"skipped"`
+	// BeforeSnapshot/AfterSnapshot 是该节点前后的 TaskSnapshot 浅拷贝(只保留
+	// 阶段 4 关心的字段,避免 step_history 数组过大)。key 是字段名(与
+	// TaskSnapshot 顶层一致),value 是序列化值。omitempty 兼容阶段 1-3 数据。
+	BeforeSnapshot map[string]any `json:"before_snapshot,omitempty"`
+	AfterSnapshot  map[string]any `json:"after_snapshot,omitempty"`
 }
 
 // TaskSpec 任务当前使用的工作流规格。
@@ -84,6 +94,16 @@ type ReviewReport struct {
 	// Summary 是审核节点流式生成的人类可读 markdown 正文(逐字推送给前端)。
 	// 流式路径下有值;结构化的 StrategyItems/QualityItems 可能为空。
 	Summary string `json:"summary,omitempty"`
+	// ─── 阶段 6 新增(workbuddy 借鉴)─────────────────────────────────
+	// TargetNode 智能路由目标节点 kind(阶段 6 workbuddy 借鉴)。
+	// reviewer 根据 fail 维度决定"问题出在哪里,应回退到哪个上游节点重做":
+	//   - "plan_strategy"  → strategy_items fail(策略 / 叙事 / 配比严重偏离)
+	//   - "build_framework" → quality_items "结构合理性" fail
+	//   - "enrich_content"  → 其它内容 / 文献 / 时长问题(默认兜底)
+	//   - "human_final"     → 重大策略 / 概念错误需用户介入(慎用)
+	// Validator 强制白名单;非法值降级为 "enrich_content"。
+	// 空字符串表示未设置(默认 enrich_content);overall=pass 时可不设置。
+	TargetNode string `json:"target_node,omitempty"`
 }
 
 // TaskSnapshot 任务在某一时刻的完整快照。
@@ -118,6 +138,10 @@ type TaskSnapshot struct {
 	StepHistory        []StepHistoryItem `json:"step_history"`
 	Spec               TaskSpec          `json:"spec"`
 
+	// 阶段 4(2026-08-11):artifact 索引。key → 当前版本号 + 总版本数 + 列表 URL。
+	// 实际内容走 GET /api/tasks/:id/artifacts/:key;此处只是元数据。
+	Artifacts map[string]ArtifactKeyRef `json:"artifacts,omitempty"`
+
 	// 后端内部字段:记录当前 Eino interrupt id 供 resume 定位。
 	//
 	// 注意:必须序列化到 JSON,因为 SQLite 里 snapshot 以 JSON blob 形式存储 ——
@@ -127,6 +151,15 @@ type TaskSnapshot struct {
 	// 字段名以下划线开头, 表明是后端内部字段, 前端 TS 类型不消费它。
 	// omitempty 让首次 running 时 (还没 interrupt) 不占字节。
 	InterruptID string `json:"_interrupt_id,omitempty"`
+}
+
+// ArtifactKeyRef 是 TaskSnapshot.Artifacts[k] 的引用结构(无 content,只指向版本)。
+// 字段 json tag 与 store/sqlite 同名类型一致;handler 构造时直接赋值。
+type ArtifactKeyRef struct {
+	Key            string `json:"key"`
+	CurrentVersion int    `json:"current_version"`
+	TotalVersions  int    `json:"total_versions"`
+	LatestURL      string `json:"latest_url"`
 }
 
 // TaskSummary GET /api/tasks 列表页用的摘要。

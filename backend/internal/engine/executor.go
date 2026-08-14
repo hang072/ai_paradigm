@@ -20,8 +20,12 @@ import (
 // 如果前端建立了 SSE 连接,每步更新后会主动推送 snapshot 到连接。
 //
 // 并发安全:每个 taskID 一个 sync.Mutex,同一任务的 Start / Resume 串行化。
+//
+// 阶段 3 改动(2026-08-11):graph 字段变为 graphBuilder(spec) 的 lazy 模式
+// —— 首次 run 时根据 snap.Spec 选 BuildTaskGraph(静态兜底)或 BuildGraphFromSpec
+// (动态)。失败回退到 tpl-full 的 10 节点图。
 type Executor struct {
-	graph           compose.Runnable[string, string]
+	graphBuilder func(spec domain.TaskSpec) (compose.Runnable[string, string], error)
 	snapshotStore   store.TaskSnapshotStore
 	checkpointStore compose.CheckPointStore
 	templateStore   interface {
@@ -29,26 +33,24 @@ type Executor struct {
 		List() []*domain.WorkflowTemplate
 	}
 
+	// dynamicDeps 用于 BuildGraphFromSpec。nil 时 executor 退化为只能
+	// 跑静态图(向后兼容测试场景)。
+	dynamicDeps *DynamicGraphDeps
+
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex
 
 	// cancels 持有每个正在跑的 taskID 的 context.CancelFunc。
-	// Cancel(taskID) 会调用它,eino compose.Graph 在每步循环开头 poll ctx.Done,
-	// 一旦收到就 return context.Canceled 包裹的 GraphRunError, run() 在错误分支
-	// 里落 TaskStatusCancelled 终态。
-	//
-	// waiting_human 期间 goroutine 已退出, map 里不会有对应 entry —— Cancel 那时
-	// 直接同步改 status(见 Cancel 方法内)。
 	cancelsMu sync.Mutex
 	cancels   map[string]context.CancelFunc
 
 	// broadcasters 保存每个 taskID 所有订阅 SSE 的 channel
-	// 每次 snapshot 更新 / token 增量后,广播给所有订阅者
 	broadcMu     sync.RWMutex
 	broadcasters map[string][]chan *TaskEvent
 }
 
-// NewExecutor 构造。
+// NewExecutor 构造。graph 参数是默认图(老 10 节点);若要支持动态构图,
+// 调用 NewExecutorWithDynamic 把 dynamicDeps 一起注入。
 func NewExecutor(
 	g compose.Runnable[string, string],
 	snap store.TaskSnapshotStore,
@@ -59,7 +61,7 @@ func NewExecutor(
 	},
 ) *Executor {
 	return &Executor{
-		graph:           g,
+		graphBuilder:    func(_ domain.TaskSpec) (compose.Runnable[string, string], error) { return g, nil },
 		snapshotStore:   snap,
 		checkpointStore: cp,
 		templateStore:   tpl,
@@ -67,6 +69,86 @@ func NewExecutor(
 		cancels:         make(map[string]context.CancelFunc),
 		broadcasters:    make(map[string][]chan *TaskEvent),
 	}
+}
+
+// NewExecutorWithDynamic 构造支持动态构图的 executor。
+// 当 spec 非空且非 10 节点模板的克隆时,优先走 BuildGraphFromSpec;失败时
+// 退到 BuildTaskGraph(默认图)。
+func NewExecutorWithDynamic(
+	defaultGraph compose.Runnable[string, string],
+	snap store.TaskSnapshotStore,
+	cp compose.CheckPointStore,
+	tpl interface {
+		Get(id string) (*domain.WorkflowTemplate, bool)
+		List() []*domain.WorkflowTemplate
+	},
+	dynamicDeps *DynamicGraphDeps,
+) *Executor {
+	e := &Executor{
+		snapshotStore:   snap,
+		checkpointStore: cp,
+		templateStore:   tpl,
+		dynamicDeps:     dynamicDeps,
+		locks:           make(map[string]*sync.Mutex),
+		cancels:         make(map[string]context.CancelFunc),
+		broadcasters:    make(map[string][]chan *TaskEvent),
+	}
+	e.graphBuilder = func(spec domain.TaskSpec) (compose.Runnable[string, string], error) {
+		// 阶段 3 选择策略:
+		//   - spec 为空 / 全空 nodes → 走老图(兜底)
+		//   - spec 是 tpl-full / tpl-slide-simple / tpl-article-simple 的克隆
+		//     (entry = parse_brief + 至少 plan_strategy/build_framework/enrich_content)
+		//     → 走老图(老图已 hardcode 这些节点的 branch 逻辑,比 spec 拼图更稳)
+		//   - 其它(Planner 输出的"自由编排") → BuildGraphFromSpec
+		if len(spec.Nodes) == 0 || isBuiltinClonedSpec(spec) {
+			return defaultGraph, nil
+		}
+		if dynamicDeps == nil {
+			return defaultGraph, nil
+		}
+		return BuildGraphFromSpec(spec, *dynamicDeps)
+	}
+	return e
+}
+
+// isBuiltinClonedSpec 判定 spec 是不是从内置 tpl-full / tpl-slide-simple /
+// tpl-article-simple 克隆而来(entry + 前 5 个节点都匹配)。这种情况下走
+// 老图(branch 逻辑更完备,Planner 没自己改这些节点)。
+func isBuiltinClonedSpec(spec domain.TaskSpec) bool {
+	type builtinShape struct {
+		entry string
+		set   map[string]bool
+	}
+	shapes := []builtinShape{
+		{entry: "parse_brief", set: map[string]bool{
+			"parse_brief": true, "ask_clarification": true, "plan_strategy": true,
+			"confirm_strategy": true, "build_framework": true, "enrich_content": true,
+			"review_quality": true, "bump_revision": true, "human_final": true, "finalize": true,
+		}},
+		{entry: "parse_brief", set: map[string]bool{
+			"parse_brief": true, "ask_clarification": true, "plan_strategy": true,
+			"build_framework": true, "enrich_content": true, "human_final": true, "finalize": true,
+		}},
+	}
+	for _, s := range shapes {
+		if spec.Entry != s.entry {
+			continue
+		}
+		if len(spec.Nodes) != len(s.set) {
+			continue
+		}
+		allMatch := true
+		for _, n := range spec.Nodes {
+			if !s.set[n.Type] {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			return true
+		}
+	}
+	return false
 }
 
 // StartInput 是 POST /api/tasks 的请求参数(handler 层已经解包)。
@@ -221,7 +303,24 @@ func (e *Executor) run(taskID string, answer string, isResume bool) {
 	}
 
 	// 执行图。传 "start" 当驱动信号 —— 首次还是 resume,input 不重要(checkpoint 里已经有了)
-	_, err := e.graph.Invoke(ctx, "start", compose.WithCheckPointID(taskID))
+	// 阶段 3:从 snap.Spec 选 graph(动态 / 静态兜底)
+	snap, _ := e.snapshotStore.Get(taskID)
+	graph, gerr := e.graphBuilder(snap.Spec)
+	if gerr != nil {
+		// spec 编译失败 → 标 failed,记录 spec_compose_failed 标志
+		log.Printf("[executor] task %s spec compose failed: %v", taskID, gerr)
+		updated, _ := e.snapshotStore.Update(taskID, func(s *domain.TaskSnapshot) {
+			s.Status = domain.TaskStatusFailed
+			s.ErrorMessage = "Planner 生成的 spec 不合法: " + gerr.Error()
+			s.Pending = nil
+			addMessage(s, "[executor] spec 编译失败,任务终止")
+		})
+		if updated != nil {
+			e.Broadcast(taskID, updated)
+		}
+		return
+	}
+	_, err := graph.Invoke(ctx, "start", compose.WithCheckPointID(taskID))
 	if err != nil {
 		// 1) interrupt (HITL 挂起) —— 保留 waiting_human 状态, 记 interrupt_id 给下次 resume 用
 		if info, ok := compose.ExtractInterruptInfo(err); ok && len(info.InterruptContexts) > 0 {

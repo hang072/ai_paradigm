@@ -1,22 +1,28 @@
 # Paradigm Eino Workbench · 进度文档
 
-> 最新更新:2026-08-04
+> 最新更新:2026-08-14
 >
 > 本文件记录项目开发进度、决策记录、待办清单,便于下次会话/后续开发者快速接续。
+> 历史变更详见底部「七、变更日志」(自 2026-07-20 起,S1–S4 + 阶段 1-5 全交付)。
 
 ---
 
 ## 一、当前状态一句话
 
-**前端 MVP 完整可跑,mock 后端支撑全部主流程。等待 Eino Go 后端进场替换 mock。**
+**前端 + 后端双端完整可跑。前端内置 mock 引擎兜底(零依赖演示),后端 Go + Eino + SQLite 支撑主流程(S1–S4 + 阶段 1-5 全交付,2026-08-11 收口)。**
 
 | 指标 | 值 |
 |---|---|
 | tsc --noEmit | ✅ 通过 |
-| vite build | ✅ 通过(1.57 MB · gzip 505 KB · 3869 modules)|
+| vite build | ✅ 通过(~1.84 MB · gzip ~594 KB · ~3876 modules) |
+| go build ./... | ✅ 通过 |
+| go test ./... | ✅ 6 个 artifact_e2e + 解析/校验单测全过 |
 | 主流程闭环 | ✅ 澄清 → 策略确认 → 框架 → 内容 → 审核回路 → 终稿反馈 → 定稿 |
-| 页面数 | 7 · 全部可用 |
-| Mock 内置数据 | 6 Agents / 10 Nodes / 3 Templates / 5 Skills / 3 KB(7 篇文档)/ 2 示例任务 |
+| 页面数 | 12(含 /templates/new · /templates/:id/edit 完整编辑器) |
+| Mock / 后端内置数据 | 6 Agents / 10 Nodes / 3 Templates / 5 Skills / 3 KB(7 文档)/ 2 示例任务 |
+| 后端落地 | Go 1.25 + Eino v0.9.12 + eino-ext openai v0.1.13 + chi v5 + SQLite(modernc.org,无 CGO,WAL),60+ 端点 · 5 migrations · 10 节点 Eino Graph(静态)+ 动态 Planner 构图 |
+| 真 LLM | OpenAI-compatible(DeepSeek / Kimi / 通义 / OpenAI / Ollama),`LLM_API_KEY` 未配时 chat 路径降级 mock,engine 路径 bubble 失败 → task 状态 `failed` |
+| 真 PubMed | NCBI E-utilities,`PUBMED_EMAIL` 必填;未配时工具返回诚实"未启用",绝不伪造 PMID |
 
 ---
 
@@ -26,8 +32,8 @@
 
 - Vite 5 + React 18 + TypeScript(strict)
 - Ant Design 5 · zh-CN locale · 品牌配色(#2b57d6 主色 + #7c4dff 辅色)
-- Zustand(会话/应用状态,`useChatStore` 持久化到 localStorage,`useTasksStore` 内存)
-- React Router 6(BrowserRouter,7 条路由)
+- Zustand(全部 server-backed,2026-07-23 S3 起:`useChatStore` → `/api/chat/sessions`,`useAppStore` → `/api/settings/llm_prefs`,`useTasksStore` 内存 + 2s 轮询 `/api/tasks`)
+- React Router 6(BrowserRouter,**12 条**路由含编辑器)
 - @xyflow/react 12 + dagre LR 自动布局
 - axios + 自定义 mock adapter(80ms 假延迟),`VITE_USE_MOCK=false` 无缝切真后端
 - ESLint + Prettier · `.env.example` · `vite-env.d.ts`
@@ -80,8 +86,8 @@
 | `/tasks` · `/tasks/:id` | 左右布局 · 4 Tab(概览/画布/产物/日志)· HITL 浮动面板 · 2s 轮询 | ✅ |
 | `/agents` | 卡片列表 + 新建/编辑弹窗(prompt/工具/模型/色) | ✅ |
 | `/knowledge` | 左 KB 列表 · 右上文档列表 · 右下 Markdown 预览 · 顶部跨库检索 | ✅ |
-| `/templates` | 3 个内置模板 + xyflow 只读画布预览 | ✅ 只读 |
-| `/settings` | 3 Tab:模型接入(DeepSeek/Claude API Key 存 localStorage)· 三方集成(mock)· 关于 | ✅ |
+| `/templates` · `/templates/new` · `/templates/:id/edit` | 3 个内置模板 + 只读预览 + **完整编辑器**(3 栏 / fork 内置 / NodeConfigTable / ParameterSchemaTable / DAG 校验 / 版本化保存)— 2026-08-04 交付,2026-08-11 阶段 2/2.4 扩展 | ✅ |
+| `/settings` | 3 Tab:模型接入(8 providers:deepseek / claude / openai / tongyi / zhipu / baidu / dianciyuann / custom,后端持久化到 SQLite `llm_prefs`)· 三方集成(预留)· 关于 | ✅ |
 
 ### 2.5 Fixtures(内置数据)
 
@@ -137,40 +143,41 @@
 
 ## 三、⏳ 未完成事项(按优先级)
 
-### P0 · 后端替换(核心里程碑)
+### P0 · 后端替换(已交付 · 2026-08-11)
 
-- [ ] **Eino Go 后端骨架初始化**
-  - Go module 建立,选定项目结构(建议 `paradigm_eino_backend/` 或 `paradigm_eino/backend/`)
-  - Eino Compose Graph 编排,把 LangGraph 的 9 节点搬过来
-  - 关键难点:**Eino 中的 interrupt/resume 语义映射**(LangGraph 有原生 interrupt,Eino 需要研究实现方案)
-  - Checkpointer 选型:内存(POC)→ SQLite / Redis(生产)
-- [ ] **API 逐个替换**
-  - 优先级:agents / templates(纯 CRUD)→ tasks(状态机)→ chat(LLM 调用)→ knowledge(检索)
-  - 契约已在 `src/api/mock/index.ts` 里定死,前端零改动
-- [ ] **`VITE_USE_MOCK=false` 端到端验证**
+全部交付,详见底部「七、变更日志」S1–S4 + 阶段 1-5。
 
-### P1 · 前端未实现的编辑器
+- ✅ Eino Go 后端骨架(`/backend/`,Go 1.25 + Eino v0.9.12 + eino-ext openai v0.1.13 + chi v5)
+- ✅ interrupt/resume 语义实现(走 `compose.StatefulInterrupt` + `compose.ResumeWithData` + SQLite checkpoint,见 `engine/graph.go` / `engine/executor.go`)
+- ✅ Checkpointer:SQLite(`backend/data/app.db`,WAL,`modernc.org/sqlite` 无 CGO)
+- ✅ 5 个 SQLite migrations(init / chat_attached_expert / chat_active_task_id / template_versions / task_artifacts)
+- ✅ 60+ REST 端点(agents / nodes / templates / templates-versions / skills / kb / kb-docs / kb-search / chat / chat-sessions / planner / settings / tasks / tasks-stream / tasks-artifacts)
+- ✅ 真 LLM(OpenAI-compatible)+ 真 PubMed(NCBI E-utilities)
+- ✅ `VITE_USE_MOCK=false` 端到端冒烟:见 `backend/README.md` Smoke test
 
-- [x] **模板画布编辑器** (`pages/templates/edit.tsx` + `canvas/EditableCanvas.tsx`) — 2026-08-04 交付
+### P1 · 前端未完成的编辑器
+
+- [x] **模板画布编辑器** (`pages/templates/edit.tsx` + `canvas/EditableCanvas.tsx`) — 2026-08-04 交付,2026-08-11 阶段 2 扩展
   - ✅ 三栏布局 / 拖拽建节点 / Handle 端口连接 / 属性面板 / 保存到后端
   - ✅ 内置模板进入时自动 fork(后端 builtin 锁,前端零特殊路径)
   - ✅ 节点/边均可键盘删除;删节点自动清理悬空边
-  - ⏳ 未做:agent_id / config 编辑(本轮只编辑结构,Agent 绑定走 NodeDef 后台编辑)
-- [x] **任务画布节点点击 → 抽屉** (`pages/tasks/NodeDetailDrawer.tsx`) — 2026-08-04 交付
-  - ✅ 点击画布节点 → 右侧 720px Drawer,展示基础信息(实例/类型/Agent 绑定/端口)+ 运行状态(步骤号/影响字段数)+ 产物(按 after_keys 渲染)
+  - ✅ 阶段 2:节点 `config` 6 个约定键(sytem_prompt_template / input_keys / output_keys / retrieve_kb / retrieve_pubmed / cite_rule)+ extras JSON 编辑
+  - ✅ 阶段 2:模板 `parameter_schema` 编辑(string / number / enum / boolean)
+  - ✅ 阶段 2.4:每次保存递增 `current_version`,旧版本留 `template_versions` 表,`GET /versions` + `GET /versions/{v}` 可查
+- [x] **任务画布节点点击 → 抽屉** (`pages/tasks/NodeDetailDrawer.tsx`) — 2026-08-04 交付,2026-08-11 阶段 4 扩展
+  - ✅ 基础信息 / 运行状态 / 产物(按 after_keys 渲染)/ 「复制产物」按钮
   - ✅ 字段渲染分发:`strategy_doc` / `enriched_framework` / `final_output` 走 `MarkdownView`;`review_report` 走 `ReviewReportView`;`citations` 走可点击链接列表;`parsed_info` / `framework_skeleton` / `completeness` 走 JSON pre;`narrative_mode` / `revision_count` 走 Tag
-  - ✅ 多轮 revision:取该节点在 `step_history` 中最后一次运行的记录,优先用 `lastRun.after_keys` 决定展示哪些字段
-  - ✅ 顶部「复制产物」按钮:把节点元信息 + 字段全量 dump 成 markdown 写入剪贴板
-  - ✅ 兼容前端 mock(只声明 `strategy_doc` 单字段)与后端真模型(声明 `strategy_doc + narrative_mode` 双字段)
-  - ⏳ 未做:节点输入(进入该节点时的 state 快照),目前 `StepHistoryItem` 只存 `after_keys` 缺 `before_keys`,需要后端补字段后前端才能展示 diff
-- [ ] **知识库文件上传** — 目前只有粘贴 Markdown,缺 PDF/DOCX/TXT 导入
-- [ ] **知识库分块/向量化** — 目前是关键字匹配,接入 Eino 后需要 chunk + embedding 层
+  - ✅ 阶段 4:ArtifactPanel 折叠面板,展示所有 `task.artifacts` key + 版本列表 + 任选 v1/v2 unified diff(后端 LCS 实现,见 `api/tasks.go:simpleUnifiedDiff`)
+- [ ] **节点输入快照渲染** — 阶段 4 后端 `StepHistoryItem.before_snapshot` 已写入,前端 `NodeDetailDrawer` 尚未展示入口 state diff(只展示了出口)
+- [ ] **知识库文件上传** — 目前只有粘贴 Markdown,缺 PDF / DOCX / TXT 导入
+- [ ] **知识库分块/向量化** — 目前是关键字匹配,接入 embedding 层(chunk + vector search)
 
 ### P2 · 实时性 & 流式
 
-- [ ] **SSE / WebSocket 替换 2s 轮询**
-  - 影响:`useTasksStore` 的 pollActiveTask · `pages/tasks` 的日志刷新
-  - Chat 流式打字机效果(目前是整段返回)
+- [x] **SSE 端点 `GET /api/tasks/:id/stream`**(后端,2026-07-28 交付) — `backend/internal/api/tasks.go:173-265`
+- [x] **Chat 流式打字机** — `POST /api/chat/reply/stream` 返回 SSE,前端 `fetch + ReadableStream` 消费(2026-07-28 修复主助手,2026-07-28 团队 enrich 节点流式)
+- [x] **任务侧 chat 路径已用 SSE** — `pages/chat/index.tsx:688-762` `startTaskUpdates` 消费 `/stream`(2026-07-28)
+- [ ] **`useTasksStore` 改 EventSource 替代 2s 轮询** — 影响 `/tasks/:id` 页面日志刷新(chat 已用 SSE);`useTasksStore.pollActiveTask` 是单一改造点
 
 ### P3 · 三方集成(真接)
 
@@ -181,8 +188,8 @@
 
 - [ ] **单元测试**:Vitest + React Testing Library
 - [ ] **E2E**:Playwright 覆盖 HITL 主流程
-- [ ] Bundle 拆分(1.57 MB 过大,建议 antd + xyflow + react-markdown 按需分 chunk)
-- [ ] `search_literature` / `verify_reference` 工具轨迹仍是硬编码假回复(未接入真检索器,`search_kb` 已经实体化)
+- [ ] Bundle 拆分(~1.84 MB 过大,建议 antd + xyflow + react-markdown 按需分 chunk)
+- [ ] `search_literature` / `verify_reference` 已在 chat 路径接入真 PubMed(`backend/internal/pubmed/`);**任务流 enrich 仅集成 `search_literature` 等价的 `litSource.Search`**,待补 `verify_reference` 在任务流的链路
 
 ### 明确不做
 
@@ -310,6 +317,370 @@ POST /api/chat/reply  { message, mode, agent_id?, team_template_id?, tools, skil
 ---
 
 ## 七、变更日志
+
+### 2026-08-14 · 阶段 5 续 5 P91 · PDF 解析统一走 PyMuPDF sidecar
+
+**背景**:P85 抽图走 pdfcpu(0% 抽图率, CMYK colorspace 限制)+ 抽文走 Qwen-VL(30-60s/PDF),P91 改用 **PyMuPDF + pymupdf4llm** Python sidecar 一步抽 PDF 的文本 / 图 / 表 / 原始 page JSON。PoC 验证 14 份医学 PDF 抽图 41/41 = 100%, 1-2.5s/PDF。
+
+**变更**:
+
+- **新 sidecar** `backend/sidecars/pymupdf-extract/`(FastAPI + uvicorn)
+  - `app.py` + `extract.py` · `POST /extract` 接 `{blob_b64}` 返 `{markdown, raw_json, pages_n, images[], tables_count, elapsed_ms}` · `GET /health`
+  - `Dockerfile` · `requirements.txt`(fastapi 0.115.0 / uvicorn 0.30.6 / pymupdf4llm 0.0.18 / pymupdf 1.24.10)· `README.md`(接口契约 + 性能表 + 失败模式)
+  - 单图 base64 编码后塞 JSON, Go 端解码落盘, sidecar 不接触 `data/kb_images`
+  - 单 PDF 上限 64 MiB (跟后端上传硬上限对齐)
+- **新 Go 客户端** `internal/embedding/pymupdf.go` · `PymupdfClient` 走 `net/http` + 1 次 transient 重试(照抄 vision.go 模式)。 启动时 ping `/health`, 失败 → fatal
+- **新 parser** `internal/parser/pymupdf_parser.go` · `PymupdfParser` 接 `[]ImageBlob` 落 `ParseResult.Images`, `main.go` 调 `parser.SetPymupdfClient` 注入
+- **`internal/embedding/kbimages.go`** · 把 P85 `internal/kbimages/` 包的 `ExtractedImage` / `DocImagesRoot` / `DocDir` / `CleanupDocDir` / `CleanupKBDir` / `ResolveImagePath` 全迁过来(签名不变, 前端 `DocStructureImage` 兼容), 新增 `PersistImages(kbID, docID, []ImageBlob, maxBytes) -> []ExtractedImage` 落盘
+- **`internal/embedding/jobqueue.go`** · P85 那段 `if IsPDFName && kbimages.ExtractAndPersist(...)` 删了, 改走 `result.Images -> embedding.PersistImages`, 失败 / 0 图不阻断主流程
+- **API handler** `internal/api/kb_reembed.go` / `kb_uploads.go` · 把 `kbimages.CleanupDocDir` / `kbimages.ResolveImagePath` 切到 `embedding.*` 同名函数
+- **删**:
+  - `internal/kbimages/` 整个目录(extractor.go + extractor_test.go)
+  - `scripts/test-kbimages/` 旧 smoke 脚本
+  - `go.mod` 的 `github.com/pdfcpu/pdfcpu v0.10.1`(`go mod tidy` 摘掉)
+  - pdfview 保留(CLAUDE.md memory 要求, 给 parser 备用)
+- **docker-compose** · 加 `pymupdf-sidecar` 服务(本地 build + 端口 8002 + healthcheck + start_period 20s), 同时加可选 `backend` service(profiles: ["backend"], `docker compose --profile backend up` 才启), 网络统一成 `paradigm-net`
+- **新镜像** `backend/Dockerfile` · multi-stage golang:1.22-alpine → alpine:3.20 静态二进制, 非 root + 时区 Asia/Shanghai
+- **新 .dockerignore** · 排除 `data/` `logs/` `*.db` 等, 防数据卷被拷进 builder
+- **新测试**:
+  - `internal/embedding/kbimages_test.go` · 12 个 case(PersistImages happy / empty / reembed 清旧 / maxBytes 跳过 / 未知 ext 跳过 / ResolveImagePath 8 子 case path traversal / normalizeExt 白名单 / isSafeSeg 字符集 / PersistImagesJSON 形状 / CleanupDocDir + KBDir 幂等)
+  - `internal/embedding/pymupdf_e2e_test.go` · `TestE2E_PymupdfSidecar` 走 sidecar → ParseResult → PersistImages 落盘 → imagesJSON 形状; sidecar 不可达时 `t.Skip`
+  - `DocImagesRoot` 由 const 改 var, 让测试能 `t.TempDir()` 隔离
+- **文档**:
+  - `backend/README.md` 加"P91 · PDF 解析走 PyMuPDF sidecar"段(P85 vs P91 对比表 + 启 sidecar 两种方式 + 配置 + 限制)
+  - `backend/sidecars/pymupdf-extract/README.md` 已有
+  - `PROGRESS.md` 本条
+- **CLAUDE.md** 同步:`P85 PDF 抽图` 段补一句"已被 P91 替代, 走 PyMuPDF sidecar"
+
+**全替决策**:
+- sidecar 不可用 → `NewPymupdfClientFromEnv` 启动 fail-fast, **不静默降级到老 PdfParser**(ledongthuc 中文乱码)或 VLM
+- 老 VLM OCR 仍保留给"扫描件无文本层"场景的兜底? 否 — P91 决策:扫描件近空 markdown 就近空, 不 fallback VLM(防止 P85 双路径复杂度回潮)
+
+**验证**:
+- `go build ./...` · `go vet ./...` · `go test ./...` 全绿
+- `docker compose -f docker-compose.yml config --quiet` 通过
+- PoC 14 份医学 PDF 抽图 100% (41/41), 1-2.5s/份
+
+**修改文件**:1 个 sidecar 全栈(4 文件) + 1 Dockerfile + 1 .dockerignore + 1 docker-compose.yml + 8 个 Go 文件 + 2 个测试 + 2 个文档 = 19 个文件
+
+### 2026-08-14 · 阶段 5 续 5 P85 · PDF 内嵌图片提取
+
+**背景**:Qwen-VL OCR 抽文本时, 文档里的真实 jpg/png 图被压平成 caption, 原文图片丢失。 用户问"为什么不见了" → 加 pdfcpu 抽 embedded images。
+
+**变更**:
+- **新依赖** `github.com/pdfcpu/pdfcpu v0.10.1` (纯 Go, 跨平台, 与 pdfview 并存)。 pdfview 仍负责"渲染 page 给 VLM 看", pdfcpu 负责"抽原图"。 init() 调 `api.DisableConfigDir()` 跳过 %APPDATA% 配置文件查找。
+- **新包** `internal/kbimages`:`ExtractAndPersist(blob, kbID, docID, maxBytes)` 走 `api.Images()` 拿 `[]map[int]model.Image`, 按 (page, obj) 排序写到 `data/kb_images/{kb}/{doc}/image_NNN.{ext}`, 返 `[]ExtractedImage` 元数据。 `ResolveImagePath` 防 path traversal(白名单 [^a-zA-Z0-9_.-])。 `CleanupDocDir` / `CleanupKBDir` 删 doc / KB 时级联。
+- **migration v9**:`kb_doc_structure.images_json TEXT` 列(JSON 数组, 旧数据 `''`)。 `UpdateImagesJSON` 单独更新列(避免整行 Upsert 覆盖 raw_json)。
+- **新端点** `GET /api/kb/{id}/docs/{docId}/images/{name}`:校验 KB / doc / sidecar.images_json 都有该 filename, 再走 ResolveImagePath 读盘, Content-Type 走扩展名映射, Cache-Control 24h。
+- **worker 集成**:`processOne` 在 parser 写完 sidecar 后, 若 `parser.IsPDFName` 为真且有 uploadBlob, 调 `kbimages.ExtractAndPersist(2min ctx, 10MB max)`, 把 imgs 写进 `UpdateImagesJSON`。
+- **删 doc 级联**:`handleDeleteDoc` 在删 sidecar 后调 `kbimages.CleanupDocDir`。
+- **前端**:`DocStructure` 加 `images: DocStructureImage[]`, `KnowledgeApi.getDocImageUrl` 拼 URL。 结构化弹窗的 figure block: 若 sidecar images 里有匹配(按 page_nr), 渲染可缩放的 `<a target=_blank><img>` 缩略图 + 像素/字节元数据; 没有就 fallback "[原图未提取]" + caption。
+- **测试**:`internal/kbimages/extractor_test.go` 7 个 case(path traversal 8 子 case + normalizeExt 白名单 + 非 PDF 不 panic + 空 blob + cleanup 幂等 + isSafeSeg)。 `go build / vet / test` 全绿。
+- **已知限制**:pdfcpu 对医学 PDF 常见的 CMYK / Indexed / ICCBased colorspace flate-lzw 图像无法 render 返二进制(本测试 kerrebroeck PDF: 14 XObjects 找到, 0 张抽出, log warn)。 DCTDecode 图像(常见 vector PDF + 嵌入 JPEG)能抽。 后续要扩, 需换 lib(如 pdfcpu 内部流解码 或 pdfium CGO)。
+- **E2E**: upload test3.pdf → worker parse → kbimages extract (14 XObjects, 0 张成功) → sidecar.images_json='[]' → DELETE doc → 图片目录自动清。
+
+### 2026-08-14 · 阶段 5 续 5 P84 · 单 doc 向量化 + 删 doc API + UI
+
+**背景**:用户点 KB 列表每篇 doc 行内按钮, 单 doc 级别重灌(失败重试)/ 删除。 修复 worker panic 兜底。
+
+**变更**:
+- **新端点** `POST /api/kb/{id}/docs/{docId}/reembed` — 后端先调 `Milvus.DeleteByDocID` 清旧 chunks, 再 `EnqueueDoc` 入队重灌。 返 `{doc_id, status:"pending"}`。
+- **新端点** `DELETE /api/kb/{id}/docs/{docId}` — 级联清 Milvus chunks(失败不阻断 + 警告) → 删 BLOB(幂等) → 删 sidecar(幂等) → 从 KB.Docs 摘除。 返 `{doc_id, kb_id, deleted:true}`。
+- **`JobQueue.ReembedDoc(docID)`** — 包装 `DeleteByDocID + EnqueueDoc`, 30s ctx。
+- **`InitKBStores(uploads, ds)`** — 新 package-level 注入, 单 doc delete handler 拿 pkgKbUploads / pkgDocStructures(同 `InitEmbedding` 模式)。
+- **前端 KB 页**:`embedStatus` 字典驱动 row badge(待处理 / 解析中 / 就绪 / 失败),`ThunderboltOutlined` 重新向量化按钮(失败变红),`Popconfirm` 描述增加"会同时删除 Milvus 向量与原始文件"。 `openEmbedStatusStream` 返 EventSource, `parsing/ready/failed` 三事件, ready 后自动 `refresh()` 拉新 KB。
+- **worker panic recover** (P86): 之前 `chunker.go:184` 调 `goldmark Segment.Value` 用 package-level 空 `var mdSrc = []byte(``)` 必 panic → worker 死 → 服务挂。 改 chunker 用 `[]byte(content)` 切片喂 `text.NewReader`, worker 主循环加 `defer recover()` 转 `EmbedFailed` 事件, 后续 jobs 继续处理。
+- **API_CONTRACT.md** §2 KB 端点表加 2 行 + 注释。
+- **测试**: `go build / go vet / go test ./...` 全绿(embedding / engine / parser / pubmed)。 E2E: 上一 markdown doc → 4s 嵌入就绪 → DELETE 返 200 → KB count -1 → blob 404 → search 不命中。
+
+### 2026-08-11 · 阶段 6 · 借鉴 workbuddy 专家团的两项关键能力(契约 v1.1 → v1.2)
+
+**背景**:对比 workbuddy 的 SoftwareCompany 专家团,识别出 paradigm_eino 两个可借鉴特征 — Agent 拟人化(花名 + 头像)和 Review 智能路由(按 fail 维度回流到不同上游节点)。这能让 UI 从"工具感"变成"团队感",并把"QA 智能分流"从 prompt 描述升级为图分支强校验。
+
+**变更**:
+- **改动 1 · Agent 拟人化**:`AgentDef` +2 字段 `display_name` / `avatar`,零 schema 变更(entities 表 JSON 透传)。6 个 builtin agent 填中文花名(许清楚/齐活林/贾架构/寇豆码/严把关/谷百通)+ 单 codepoint emoji(👂/🧭/🏛️/📝/🔍/💡)。前端新建 `AgentAvatar` 组件 + `useAgentMap` hook,改造 12 处 UI 点(chat 6 / agents 2 / drawer 1 / canvas 3)。chat 路径**不存**新字段到 SQLite(避免迁移),前端通过 `getAgent` 实时拉取。
+- **改动 2 · Review 智能路由**:`ReviewReport` +1 字段 `target_node`,白名单 `{plan_strategy / build_framework / enrich_content / human_final}`,非法值降级不报错。LLM prompt 加"智能路由"决策规则,流式加 `回流到: <kind>` 哨兵行,共享 `parseReviewStreamText` 解析器签名改为 4-tuple。静态图 `graph.go reviewBranch` + 动态图 `graph_dynamic.go AddBranch` 都按 `target_node` 路由,`revision_count` 仍每次 +1 保留 `MAX_REVISION=2` 硬限。Planner system prompt 同步要求 spec 含 review_quality 时必带 4 个下游 kind,否则 `BuildGraphFromSpec` 拒收 + 走 `tpl-full` fallback。
+- **文档**:`API_CONTRACT.md` 升 v1.2,加 §5.x 路由决策表 + §一 v1.2 拟人化说明。
+- **测试**:`TestParseReviewStreamText` +4 用例(plan_strategy / build_framework / 缺省 / pass 忽略)、`TestValidateReviewQuality` +3 用例(合法 / 非法降级 / 缺省)、新建 `TestReviewQualityRegistry_RoundTrip`(含正常 / 缺省 / 非法降级三个 round-trip)。
+
+**关键决策**:
+- `target_node=plan_strategy` 经 `PreStrategy` → `plan_strategy` → `confirm_strategy` 链路,**保留用户重新确认策略的机会**(不绕过 confirm_strategy interrupt)
+- `target_node=build_framework` 直接回 `build_framework` 节点(骨架是内部产物,不触发 confirm)
+- `target_node=human_final` 不增 revision_count 不可控场景,选择"中断"让用户决定
+- `chat_messages` 表不存新字段(选 B 方案):选 B 比选 A 简单,避免 migration v6 + 改 Scan/INSERT,前端 bubble 渲染时实时 `getAgent` 拉
+
+**回退**:`target_node` 缺省 / 非法都降级为 `enrich_content`,与 v1.1 行为完全兼容;`display_name/avatar` 全 `omitempty`,旧数据 / 老客户端零影响。
+
+**E2E 验证**:
+- 后端:`go test ./internal/engine/ -run 'TestParseReviewStreamText|TestValidateReviewQuality|TestReviewQualityRegistry' -count=1` 全过
+- 前端:`npx tsc --noEmit` 通过
+- 手动:前端切真后端模式,启动任务,验证 review_report.target_node 标签显示 + 智能路由生效(动态图走 Planner 时不因 spec 缺 4 节点而启动失败)
+
+**修改文件**:12 个后端 + 13 个前端 + 3 个测试 + 3 个文档 = 31 个文件
+
+### 2026-08-11 · 阶段 5 · API_CONTRACT.md 增补(v1.0 → v1.1)
+
+**背景**:阶段 1-4 给后端加了 6 个新端点、3 个 SQLite 表、~20 个新字段,但 `API_CONTRACT.md` 还停留在阶段 0 的版本。这次把所有阶段 1-4 的契约变更集中文档化,并标注 v1.1。
+
+**落地**(`API_CONTRACT.md` 从 425 行扩到 618 行):
+
+文档顶部加契约版本号说明 + v1.0 → v1.1 变更摘要。
+
+| 章节 | 增补内容 |
+|---|---|
+| **一、Agents** | v1.1:5 字段已写(阶段 1) |
+| **二、Nodes / Templates** | v1.1:WorkflowTemplate +4 字段(parameter_schema / description_required_inputs / current_version / versions);端点 +2:`GET /versions` 与 `GET /versions/{v}`;PUT 改"乐观锁 + 创建新版本" |
+| **五、Tasks** | v1.1:TaskSnapshot +Artifacts 索引(ArtifactKeyRef 类型);StepHistoryItem +before_snapshot/after_snapshot 浅拷贝 |
+| **六、Chat** | v1.1:新增 §6.2 阶段 3 动态 Planner — `POST /api/planner/compose` 端点 / PlannerComposeInput / PlannerComposeResponse 完整 schema / 5min LRU 缓存策略 / 前端 chat 切换行为 / mock 引擎兜底 |
+| **七、Artifact 仓库(新章)** | 5 端点完整列表 + ArtifactRef / ArtifactRow / ArtifactDiff 三个类型 + 错误码 + SQLite 表结构 + 前端消费点(NodeDetailDrawer ArtifactPanel) |
+| **八、模板版本(新章)** | 2 端点 + 错误码 + SQLite v4 迁移 |
+| **十、测试建议** | 6 项原测试清单 + 4 项 v1.1 增补(参数 schema、版本号、artifact 写盘、Planner);引用阶段 4.10 E2E 集成测试 |
+
+**未改动**:源码、SQLite schema、mock engine、e2e 测试。
+
+**验证**:
+- 后端 `go build ./...` / `go vet ./...` 零错(本次无代码变更,纯文档)
+- `API_CONTRACT.md` 内部一致性:所有引用"阶段 1-4"的端点 / 字段 / 路径均与实际 `frontend/src/api/*.ts` 与 `backend/internal/api/*.go` 一致
+- 文档 618 行,10 个主章节,与项目其它文档(README / CLAUDE.md / PROGRESS.md)形成完整体系
+
+### 2026-08-11 · 阶段 4.10 · E2E 集成测试(artifact 写盘 + diff 端到端)
+
+**背景**:阶段 4.6 改完 6 个 step 函数走 artifact store 后,需要端到端验证契约。直接起后端 + 配 LLM 跑通整流程门槛高(需要真实 LLM key),务实方案是用临时 SQLite + 直接调 store 层验证 5 个核心契约。
+
+**落地**:
+- `internal/engine/artifact_e2e_test.go`(新)6 个 e2e 测试:
+  1. `TestE2E_ArtifactWrite_TwoRevisions` — 同 key 写 2 次,version 单调递增 1→2,ListKeys / ListVersions / GetVersion 全验证
+  2. `TestE2E_ArtifactDiff_RealContent` — 真实 medical 内容(v1 短,v2 改写 + 新增"不良反应"段),验证 diff 头部 `--- v1\n+++ v2\n` + 含 +/- 行
+  3. `TestE2E_ArtifactWrite_IndexSync` — `writeArtifactKey` 同步更新 `snap.Artifacts` 索引
+  4. `TestE2E_ArtifactSnapshotSerialize_RoundTrip` — TaskSnapshot JSON 序列化 / 反序列化不丢 Artifacts 字段(模拟 SQLite JSON blob 读写)
+  5. `TestE2E_ArtifactEmptySnapshots_NoCrash` — 空 task 不 crash,GetLatest 返回 `ErrArtifactNotFound`
+  6. `TestE2E_HTTP_ArtifactEndpointsContract` — HTTP-level 契约(store 层的语义 = http 端点返回的语义)
+- 临时 SQLite(`t.TempDir()`)+ 跑 migrations v1-v5,无外部依赖
+- 嵌入 `simpleDiffForTest`(LCS + unified),与 `api/tasks.go:simpleUnifiedDiff` 等价,避免跨包 import 循环
+
+**为什么不直接起 http server?** 起 server 涉及 chat / tasks / executor / 多个 fixtures 装配,工作量大但对 4.6 验证边际收益小(store 层契约 + JSON 序列化已能覆盖 90% 风险)。生产 e2e 留 hook 注释在 `TestE2E_HTTP_ArtifactEndpointsContract`,配 LLM key 时可继续拓展。
+
+**验证**:
+- `go test ./internal/engine/ -run TestE2E -v` 6 个测试全 PASS
+- `go build ./...` / `go vet ./...` 零错
+- diff 实际输出(已打印)显示 v1→v2 的真实行级变更:
+  ```
+  --- v1
+  +++ v2
+   ## 背景
+  
+  -二甲双胍是一线降糖药。
+  +二甲双胍是 2 型糖尿病的一线降糖用药。
+  
+   ## 机制
+  
+  -抑制肝糖输出。
+  +抑制肝糖输出 + 增加外周胰岛素敏感性。
+  +
+  +## 不良反应
+  +
+  +胃肠道反应为主,长期使用注意 B12 吸收。
+  ```
+- 前端:`npm run typecheck` 零错;`npm run build` 通过(3876 modules,1.84MB / gzip 594KB,无变化)
+
+### 2026-08-11 · 阶段 4.6 · step 写盘路径走 artifact store(收口)
+
+**背景**:阶段 4 引入了 `task_artifacts` 表 + `/artifacts/*` 端点 + LCS diff,但实际写盘路径没改:`enrich_content` 等节点写 `snapshot.EnrichedFramework` 时仍只覆盖顶层字段,旧版本永久丢失。阶段 4.6 真正把 6 个 step 函数改造成"写 snapshot + 写 artifact + 同步 Artifacts 索引 + 填 before/after 浅拷"。
+
+**落地**:
+
+后端:
+- `internal/engine/artifact_writer.go`(新):`writeArtifactKey(taskArtifacts, snap, key, content, contentType, nodeID, agentID)` 统一写盘入口(nil-safe,自动 +1 version,自动更新 `snap.Artifacts[key]` 索引)
+- `internal/engine/snapshot.go`:`pushStep` 保留(老 API),新增 `pushStepWithDiff(..., before, after)`;新增 `shallowSnapshot(snap, keys)` 抽指定字段成 map(用于 before/after 浅拷)
+- `internal/engine/steps.go`:6 个写盘节点改造 —— `applyParseBriefLLM` / `applyPlanStrategyLLM` / `applyBuildFrameworkLLM` / `applyEnrichContentLLM` (含流式 `enrichContentStream`) / `applyReviewQualityLLM` (含流式 `reviewQualityStream`) / `applyFinalize`,每个都:
+  1. `before := shallowSnapshot(s, keys)`
+  2. 写 snapshot 字段
+  3. 调 `writeArtifactKey` 写 artifact + 同步索引
+  4. `after := shallowSnapshot(s, keys)`
+  5. `pushStepWithDiff` 替换原 `pushStep`
+- 6 个函数签名加 `*sqlitestore.TaskArtifacts` 形参,`BuildTaskGraph` + `DynamicGraphDeps` 也加,`main.go` 装配
+- `enrich_stream_test.go` + `review_stream_test.go` 3 个测试调用补 `nil` taskArtifacts(走 nil-safe 路径)
+
+前端:
+- 阶段 4.4 已实现:NodeDetailDrawer 的 ArtifactPanel 渲染 `task.artifacts` 列表 + 版本 + diff
+- 此阶段无需新代码——`TaskSnapshot.artifacts` 后端返回的字段自动被前端消费
+
+**行为差异**:
+- 旧:`enriched_framework` v1 → 触发 revise → 写 v2 时 v1 被覆盖,**永久丢失**
+- 新:`enriched_framework` v1 → 触发 revise → v1 落 `task_artifacts` 表 → 写 v2 时 v1 保留 → NodeDetailDrawer 看 2 个版本,可选 diff
+
+**验证**:
+- 后端:`go build ./...` / `go vet ./...` 零错;`go test ./...` engine + pubmed 全绿(5 个 stream 测试补 nil 仍通过)
+- 前端:`npm run typecheck` 零错;`npm run build` 通过(3876 modules,1.84MB / gzip 594KB,无变化)
+- E2E(需手测 + LLM key):触发 enrich_content → SQLite `task_artifacts` 表 `enriched_framework` v1 落库 → 触发 revise → enrich 再跑 → v2 落库 → `GET /api/tasks/:id/artifacts/enriched_framework/diff?v1=1&v2=2` 返回真实 unified diff
+
+### 2026-08-11 · 阶段 3.1 · 节点注册表 + GenericStep 框架
+
+**背景**:阶段 3.2 的 `graph_dynamic.go` 用 switch-case 把 10 个 builtin type 路由到 `apply*LLM` 函数。新增 NodeDef 需要改 switch + 在 `apply*LLM` 旁加一个对应函数。阶段 3.1 把"节点类型 → 渲染器 / 校验器 / 副作用"显式建模为 `NodeKindSpec` 注册表,新增 builtin 节点只需在注册表里加一条,不再改 graph。
+
+**落地**:
+
+后端:
+- `internal/engine/registry.go`(新):3 个接口(MessageRenderer / OutputValidator / SideEffect)+ `NodeKindSpec` 类型 + 5 个 builtin compute 节点的 renderer/validator 适配器(把既有 prompts.go 函数包成接口实现,无重写)+ `RegisterNodeKind` / `LookupNodeKind` / `ListRegisteredNodeKinds` + 10 个 kind 的 init() 占位 + `SetBuiltinSources(agents, kbs, lits)` 在 main.go 装配
+- `internal/engine/generic_step.go`(新):`runGenericStep` 统一流水线 —— SideEffect → Renderer → Complete/Stream(contentType 决定)→ ParseAndValidate → Apply。`runBlockLLM` 走 Complete,`runStreamLLM` 走 Stream + 推 TokenSink
+- `internal/engine/graph_dynamic.go`:`buildLambdaForInstance` 不再 switch compute case,改 `LookupNodeKind` 查注册表;interrupt / counter / finalize 仍用专用 lambda(它们是结构性的,不走 LLM)
+- `internal/engine/steps.go`:补 4 个 `applyXxxFromResult` helper(把 LLM 解析结果写回 snapshot 的统一路径),保留给旧 `apply*LLM` 函数复用
+- `cmd/server/main.go`:在 BuildTaskGraph 之前调 `engine.SetBuiltinSources(agentStore, kbStore, litSource)` 注入依赖
+
+**未改动**:5 个 `apply*LLM` 函数本体(graph.go 仍直接用),SQLite schema,API 契约,前端 types
+
+**验证**:
+- 后端:`go build ./...` / `go vet ./...` 零错;`go test ./...` engine + pubmed 全绿
+- 前端:`npm run typecheck` 零错;`npm run build` 通过(3876 modules,1.84MB / gzip 594KB,无变化)
+- E2E(需手测):Planner 输出的 spec 引用 enrich_content → 走 `runGenericStep` → 走 enrichContentSideEffect(KB+PubMed)+ enrichContentRenderer(RenderExtras 含 sources)+ enrichContentValidator(校验 + 写盘);tpl-full 老路径走 graph.go 老 lambda,行为不变
+
+### 2026-08-11 · 阶段 4 · 共享工件仓库(Artifact Store + 多版本 diff)
+
+**背景**:enrich_content 多轮修订会覆盖 snapshot.enriched_framework,旧版本永久丢失,PROGRESS.md:165 提到的 `before_keys` 缺口也借此一并解决。阶段 4 把"每一步的产物"独立存为不可变 artifact,前端可读任意版本或对比 diff。
+
+**落地**:
+
+后端:
+- `internal/store/sqlite/migrations.go` v5:新增 `task_artifacts(task_id, key, version, content, content_type, produced_by, produced_by_agent, created_at, metadata_json)`,复合主键
+- `internal/store/sqlite/task_artifacts.go`(新):`TaskArtifacts` 实现 `WriteArtifact / GetLatest / GetVersion / ListKeys / ListVersions`;每写 +1 version,旧版保留
+- `internal/domain/task.go`:`TaskSnapshot` 增 `Artifacts map[string]ArtifactKeyRef`(只存元数据,引用 URL);`StepHistoryItem` 增 `BeforeSnapshot / AfterSnapshot` 字段(节点入口/出口的浅拷贝,前端可 diff 节点前后变化);`ArtifactKeyRef` 类型(避免 store ↔ domain 循环依赖)
+- `internal/api/tasks.go`:`TasksDeps` 增 `Artifacts` 字段;新增 5 个端点:
+  - `GET /api/tasks/:id/artifacts` — 列出 key 与版本
+  - `GET /api/tasks/:id/artifacts/:key` — 取 latest
+  - `GET /api/tasks/:id/artifacts/:key/versions` — 列出所有 version
+  - `GET /api/tasks/:id/artifacts/:key/versions/:v` — 取指定 version
+  - `GET /api/tasks/:id/artifacts/:key/diff?v1=X&v2=Y` — 文本 diff(自实现 LCS + unified 格式,无第三方依赖)
+- `cmd/server/main.go` 装配 `taskArtifacts` 注入 tasks handler
+
+前端:
+- `src/api/artifacts.ts`(新):5 个端点的 typed 客户端
+- `src/types/task.ts`:`StepHistoryItem` 加 `before_snapshot / after_snapshot`;`TaskSnapshot` 加 `artifacts?` 字段
+- `src/pages/tasks/NodeDetailDrawer.tsx`:在节点产物 section 之后,新增"工件历史"折叠面板 `ArtifactPanel` —— 列出 `task.artifacts` 所有 key,每个 key 可点开看版本列表 + 任意两版本 unified diff。默认对比"最旧 vs 最新"
+
+**未改动**:`enrich_content` / `review_quality` 等步骤的写盘路径(仍写 snapshot 顶层字段,字段值的"持久版本化"留给 step 函数的下一轮迭代)。Artifact Store 已就位,新步骤(阶段 4+ 真正接入)只需把 snapshot 写盘改成 `artifactStore.WriteArtifact(taskID, key, content, contentType, nodeID, agentID, meta)` 即可,旧数据兼容。
+
+**验证**:
+- 后端:`go build ./...` / `go vet ./...` 零错;`go test ./...` engine + pubmed 全绿
+- 前端:`npm run typecheck` 零错;`npm run build` 通过(3876 modules,1.84MB / gzip 594KB)
+- E2E(需手测):enrich_content 跑 2 次修订后,GET `/api/tasks/:id/artifacts/enriched_framework` → 200 + 2 行;GET `?v1=1&v2=2` 返回 unified diff;NodeDetailDrawer 抽屉的"工件历史"折叠展示出来
+
+### 2026-08-11 · 阶段 3 · 动态 Planner(LLM 编排 DAG + 动态构图)
+
+**背景**:阶段 1+2 已就绪(`AgentDef` 结构化 + `parameter_schema` 可配),但 chat 团队路径仍"3 选 1 模板"。阶段 3 让系统能根据用户 brief 实时生成 `TaskSpec`,由后端动态构建 Eino Graph,跑出新编排。3 个内置模板降级为兜底。
+
+**落地**:
+
+后端:
+- `internal/engine/graph_dynamic.go`(新) · `BuildGraphFromSpec(spec, deps)`:从 spec 反射构建 eino Graph。compute 节点按 type 路由到既有 `apply*LLM`(复用阶段 2b LLM 路径);interrupt 节点走 `StatefulInterrupt`;counter 走 `applyBumpRevision`;router 暂不支持(spec 校验直接拒)。边统一为单端口"advance"(老图的 pass/revise/redo 精细分支由 review_quality 内部 logic 决定)
+- `internal/engine/executor.go`:新增 `NewExecutorWithDynamic`,把 graph 字段换成 `graphBuilder(spec)` lazy 模式 —— 首次 run 时根据 `snap.Spec` 选 `BuildGraphFromSpec` 或老 `BuildTaskGraph`。新策略:`isBuiltinClonedSpec` 判定 spec 是不是 tpl-full / tpl-slide-simple / tpl-article-simple 的克隆,是则走老图(branch 逻辑更完备);否则走动态
+- `internal/planner/`(新包) · `planner.go`:`Planner.Compose(req) → ComposeResponse{Mode, Spec?, FallbackTemplateID?, Reason, LatencyMs}`。5 分钟 LRU 缓存;LLM 不可用 / 输出校验失败 → `Mode="static"` + `fallback_template_id="tpl-full"`,前端走老路径;校验通过 → `Mode="dynamic"` + 完整 spec。Spec 严格校验(node.type 必须注册、edge 端点存在、节点数 2-12、entry 必须有入边等)
+- `internal/api/planner.go`(新) + `router.go`:`POST /api/planner/compose` 端点注册
+- `cmd/server/main.go` 装配 `plannerSvc` 注入 router
+
+前端:
+- `src/api/planner.ts`(新):`PlannerApi.compose` typed 客户端
+- `src/api/mock/engine.ts`:mock `composePlanner` 返回 static + tpl-full(浏览器无 LLM,等价老路径)
+- `src/pages/chat/index.tsx` send 团队分支:首条消息先调 `PlannerApi.compose`,根据 `mode` 决定 `TasksApi.start({ spec })` 还是 `{ template_id }`。任务启动气泡展示 Planner 决策
+
+**未改动**:5 个 compute 节点的 `apply*LLM` 函数、5 个 `render*` 提示词、节点 fixtures、AgentDef 字段(阶段 1 已就绪)、SQLite schema
+
+**验证**:
+- 后端:`go build ./...` / `go vet ./...` 零错;`go test ./...` engine + pubmed 全绿
+- 前端:`npm run typecheck` 零错;`npm run build` 通过(3876 modules,1.84MB / gzip 593KB)
+- E2E(需手测):用户输入 brief → mock 走 static 兜底 tpl-full(浏览器无 LLM);真后端 + LLM 启用时 → Planner 输出 spec → 任务跑通
+
+### 2026-08-11 · 阶段 2 · 模板编辑器补全(右栏 + DAG 校验 + 版本化)
+
+**背景**:2026-08-04 交付的编辑器只支持"加节点 / 连线 / 改 entry / 改 name",真正想编辑 Agent 绑定、NodeDef.config、parameter_schema 时只能去 `/nodes` 后台编辑。阶段 2 把这些能力收到编辑器内,顺手做 DAG 校验(可达性 / 环 / 端口 / entry)与模板版本化保存。
+
+**落地**:
+
+类型层:
+- `frontend/src/types/template.ts` + `backend/internal/domain/template.go`:`WorkflowTemplate` +4 字段(`parameter_schema` / `description_required_inputs` / `current_version` / `versions`);新增 `ParameterSchemaEntry` 类型。Normalize 给 map / 切片补非 nil 默认值
+- `frontend/src/types/node.ts`:同时给 `NodeDefConfigConventions` 工具类型(供编辑器 UI 区分约定键 vs 自由键)
+
+编辑器右栏:
+- `frontend/src/pages/templates/edit.tsx` 重写,新增:
+  - `NodeConfigTable`:6 个约定键走友好 UI(system_prompt_template / input_keys / output_keys / retrieve_kb / retrieve_pubmed / cite_rule),其他键走 JSON 字符串行,可加可删
+  - `ParameterSchemaTable`:模板级入参契约编辑器,字段为 type / required / description / default / enum_values
+  - 节点属性面板:Agent 绑定从只读 Tag 升级为可改 Select(影响所有同 type 实例);config 折叠面板;删除节点按钮
+  - 顶部元信息 Card:版本号 `v{n}` + 历史版本列表;两个折叠(parameter_schema / Planner 必填入参描述)
+  - handleSave 接入 DAG 校验:有 error → Modal 弹错不让保存;有 warn → confirm 让用户决定
+- 底部实时校验问题列表 Alert,与画布同步刷新
+
+DAG 校验器(新文件 `frontend/src/pages/templates/validateTemplate.ts`):
+- 4 类问题:entry 缺失 / entry 不在 nodes / 边端点缺失 / 边端口不在源 out_ports(BFS 可达性 warn / DFS 环检测 error)
+- 环检测允许显式标注 `NodeDef.config.allow_cycle=true` 放行(`bump_revision→enrich_content` 这类合法环)
+- 错误存在 → 不允许保存;仅警告 → 提示但允许
+
+版本化保存(后端 + 前端):
+- SQLite 迁移 v4 新表 `template_versions(template_id, version, data, created_at)`,复合主键
+- 新文件 `backend/internal/store/sqlite/template_versions.go`:`SaveVersion` 自动 +1、`ListVersions` 降序、`GetVersion` 取快照
+- `backend/internal/api/templates.go`:PUT 改为"乐观锁 + 创建新版本";GET 模板时回填完整 Versions;新增 `GET /templates/{id}/versions` 与 `GET /templates/{id}/versions/{v}` 端点
+- `cmd/server/main.go`:装配 `templateVersions` 并注入 router
+- 前端 mock engine 假装版本递增(不存历史,刷新即丢);后端真存
+
+**未改动**:节点 fixtures、AgentDef、SQLite 旧表、其它端点;NodeDef.config 仍为自由字段(运行时无 schema 强制,阶段 3 GenericStep 才消费)。
+
+**验证**:
+- 后端:`go build ./...` / `go vet ./...` 零错;`go test ./...` 全绿
+- 前端:`npm run typecheck` 零错;`npm run build` 通过(3876 modules,1.84MB / gzip 593KB,比阶段 1 多 70KB 来自新加的 Collapse / Table / Switch)
+- E2E(需手测):进入 `/templates/tpl-full/edit` → 自动 fork → 改某节点 Agent 绑定 + config → 改 parameter_schema → 保存 → 后端 `GET /api/templates/{id}/versions` 返回 `[1, 2]`,`GET /api/templates/{id}/versions/1` 返回原 tpl-full
+
+### 2026-08-11 · 阶段 1 · 结构化 Agent Profile(AgentDef 扩展)
+
+**背景**:阶段 1 落地。`AgentDef` 当前只有 7 字段(对齐 paradigm_langgraph dataclass),没有 `persona / methodology / output_schema / guardrails`,导致 Planner 编排与 UI 展示都缺结构化抓手。本阶段把"散落在 system_prompt 里的契约"显式建模出来,作为后续动态 Planner(阶段 3)与模板编辑器(阶段 2)的输入。
+
+**落地**:
+
+类型扩展:
+- `frontend/src/types/agent.ts`:`AgentDef` 新增 4 个可选字段(`persona / methodology / output_schema / guardrails`),全部 optional,旧数据兼容
+- `backend/internal/domain/agent.go`:同步新增 4 字段,新增 `ArtifactOutputSpec` / `AgentGuardrails` 两个嵌套类型;`Normalize()` 给 `Methodology / OutputSchema / Guardrails.EscalateTo / Guardrails.RedLines` 补非 nil 空值(避免下游 `.Length` 断言 nil)
+- `frontend/src/types/node.ts` / `backend/internal/domain/node.go`:`NodeDef.config` 仍为自由字段(阶段 3 才由 GenericStep 消费),新增 `NodeDefConfigConventions` 约定键类型 + Go 端 `NodeDefConfigConventionKeys` 白名单,给模板编辑器(阶段 2)做静态提示用
+
+Fixtures 填齐(6 个 builtin agent,前后端镜像):
+- clarifier:`Persona: 8 年医疗内容产品经验的资深需求澄清官`;`Methodology: 4 步`;`OutputSchema: {parsed_info, completeness, clarification_questions}`;`Guardrails: no_fabricate + escalate_to=planner`
+- planner:`Persona: 医学学术内容策略师`;`Methodology: 5 步`;`OutputSchema: {strategy_doc, narrative_mode}`;`Guardrails: no_fabricate`
+- builder:`Methodology: 3 步`;`OutputSchema: {framework_skeleton}`
+- enricher:`Methodology: 4 步`;`OutputSchema: {enriched_framework, citations}`;`Guardrails: no_fabricate + require_citations + 3 条 red_lines`
+- reviewer:`Methodology: 4 步(量化阈值)`;`OutputSchema: {review_report}`;`Guardrails: no_fabricate`
+- designer:`Methodology: []`;`OutputSchema: {content}`;`Guardrails: {}`(通用助手无守门)
+
+契约与同步:
+- `API_CONTRACT.md` Agents 段:AgentDef schema 增 4 字段 + v1.1 兼容说明(Normalize 默认值、builtin UPSERT 行为)
+- `API_CONTRACT.md` Nodes 段:NodeDef.config 增约定键表(6 个 builtin 约定键 + 含义),明示"运行时无 schema 强制"
+- `frontend/src/api/mock/engine.ts` `createAgent`:补 4 字段默认值,与后端 `Normalize()` 等价
+
+**未改动**:
+- `system_prompt` 内容(契约只是显式化,系统提示词不变)
+- 节点 fixtures、模板 fixtures、`engine.ts` 状态机、Go 步骤函数、SQLite schema
+- `/api/agents` 端点(纯字段加法,无新端点)
+
+**验证**:
+- 后端:`go build ./...` / `go vet ./...` 零错;`go test ./...` 全绿(`engine` + `pubmed`)
+- 前端:`npm run typecheck` 零错;`npm run build` 通过(3875 modules,1.63MB / gzip 526KB,体积无显著变化)
+- builtin agent 走 UPSERT,重启后端时新字段自动落库;前端 mock 走 fixtures,刷新即生效
+
+### 2026-08-11 · 阶段 0 清理(陈旧文档同步)
+
+**背景**:开始阶段 1-4 演进前,先收口文档。`TODO.md` 中模板编辑器、任务画布抽屉、P2 SSE 三项已实际交付,`PROGRESS.md:165` 提到的 `before_keys` 缺口的解决方案也已锁定(走阶段 4 Artifact Store),需更新文档避免误导后续会话。
+
+**落地**:
+- `TODO.md`:
+  - P1 模板编辑器:标注 2026-08-04 交付,补实际文件路径(`pages/templates/edit.tsx` + `canvas/EditableCanvas.tsx`),加"阶段 2 增量"子项(`config` / `agent_id` / `parameter_schema` 编辑、边 condition、版本化)
+  - P1 任务画布节点点击:标注 2026-08-04 交付,补实际文件路径(`pages/tasks/NodeDetailDrawer.tsx`),加"阶段 4 增量"子项(节点输入快照)
+  - P2 SSE:已完成项打勾,`useTasksStore` 仍走 2s 轮询(chat 已用 SSE)保持 open
+- `PROGRESS.md`:
+  - P2 段:4 项里 3 项打勾(SSE 端点 / Chat 流式 / 任务侧 chat SSE),1 项保留(`/tasks/:id` 仍轮询)
+  - `PROGRESS.md:165`:`before_keys` 缺口方案指向阶段 4 Artifact Store
+  - 新增「八、阶段 1-4 演进路线」表,4 阶段索引 + 阻塞关系
+- `CLAUDE.md`:
+  - "Chat modes" 段:补充当前实现(主助手单段 + 工具调用 + 专家团走任务流),`mode: 'team'` 标为老协议(后端保留兜底)
+  - 加"目标态"段:Planner 服务实时生成 `TaskSpec`,动态构建 Eino Graph,内置模板降级为起步档位
+
+**未改动**:任何源码、契约、fixtures。
+
+**验证**:三份文档无内部矛盾,TODO.md 与 PROGRESS.md P1/P2 状态一致,CLAUDE.md Chat modes 段与 `pages/chat/index.tsx:826-891` 实现一致。
 
 ### 2026-08-04 · 任务画布节点点击 → 抽屉(NodeDetailDrawer)
 
@@ -618,6 +989,21 @@ POST /api/chat/reply  { message, mode, agent_id?, team_template_id?, tools, skil
 
 > 后续开发请在文件底部追加变更条目。
 
+---
+
+## 八、阶段 1-4 演进路线(专家团升级)
+
+> 目标:从"3 选 1 静态模板"升级到"Planner 实时编排 DAG + 共享工件仓库"。详细方案见对话历史,这里只留索引。
+
+| 阶段 | 主题 | 关键产物 | 阻塞关系 |
+|---|---|---|---|
+| **1** | 结构化 Agent Profile | `AgentDef` 增 `persona / methodology / output_schema / guardrails`;`NodeDef.config` 收紧为子结构;fixtures 全部填齐 | — |
+| **2** | 模板编辑器补全 | `edit.tsx` 右栏支持 `config` / `agent_id` / `parameter_schema` 编辑;边 condition 谓词;DAG 校验;版本化保存 | 阶段 1 |
+| **3** | 动态 Planner | `POST /api/planner/compose`;通用化 `GenericStep` + 节点注册表;`BuildTaskGraph` 改为从 spec 反射构建 | 阶段 1 |
+| **4** | 共享工件仓库 | SQLite 新增 `task_artifacts` 表;`StepHistoryItem` 增 `before_snapshot`;前端 diff UI | 阶段 3 |
+
+阶段 0(本文档清理)已完成:见最新变更日志。
+
 ### 2026-07-23 · 后端 S3 SQLite 持久化(聊天 / 设置 / CRUD / 任务全部落库)
 
 **动机**:前端 zustand `persist(localStorage)` 与浏览器 origin 绑定,Vite dev server 换端口(`5173→5174`)就丢会话与 API key。改由后端 SQLite 存储,跨端口/重启保留。
@@ -722,3 +1108,24 @@ Frontend:
 - `/chat` 挂载知识库 + 勾 `search_kb` 后:
   - 前端 tool_calls trace 显示真实命中片段(即使 LLM 未主动调工具)
   - 若 LLM 决定调用(通过 system prompt 或用户明示),会返回 `{"hits":[...]}` JSON,LLM 消化后写进答复
+
+### 2026-08-11 · 阶段 5 续 3 · KB 检索切换到 Milvus Lite 向量数据库
+
+**目标**: search_kb 从 SQLite 关键词子串匹配 → 异步 chunk + OpenAI 兼容 embedding + Milvus Lite 向量 top-k。每条 hit 携带 chunk_id + 原文片段 + 位置信息(`第 N 页` / `## 标题` / `H1 标题`)。
+
+**关键决策**:
+- Milvus 是 hard dep: 启动时 `data/milvus.db` 创建失败 / LLM_API_KEY 缺失 → server 启动失败
+- 粒度 = chunk 级,不是 doc 级(用户能点进具体段落)
+- chunker 按结构切: markdown 标题 / PDF 页 / docx 段落
+- embedding 后台异步(4 worker pool),不阻塞上传
+- fixtures 已有 doc 启动时**不**自动向量化,UI 手动点"重新向量化"才入仓
+
+**交付**:
+- 后端: `internal/embedding/` 包(types / client / chunker / milvus / jobqueue / search),`internal/api/kb_reembed.go`(POST /reembed + GET embed-status/stream SSE),router Deps 加 Embedder/Milvus/JobQ,`InitEmbedding` 注入
+- 前端: `KbSearchHit` 加 `chunk_id` + `location`,KB 卡片加 ⚡"重新向量化"按钮,`api/knowledge.ts` 加 `reembedKB` 方法
+- mock 模式 hit 携带 `chunk_id="doc-xxx:0"` + `location="mock 命中位置"` 兜底
+- `.env` / `.env.example` 加 `LLM_EMBEDDING_MODEL=text-embedding-3-small`
+
+**依赖**: `github.com/yuin/goldmark v1.8.5`, `github.com/milvus-io/milvus-sdk-go/v2 v2.4.2`
+
+**验证**: go build/vet/test 全绿, npm run typecheck/build 全绿。

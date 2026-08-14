@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"paradigm_eino_backend/internal/kb"
 	"paradigm_eino_backend/internal/llm"
 	"paradigm_eino_backend/internal/store"
+	sqlitestore "paradigm_eino_backend/internal/store/sqlite"
 )
 
 // applyParseBrief 填 parsed_info + completeness。40% 概率 enough=true(即跳过澄清)。
@@ -34,6 +36,36 @@ func applyParseBrief(s *domain.TaskSnapshot) {
 	}
 	addMessage(s, "[parse_brief] 已解析需求")
 	pushStep(s, "parse_brief", []string{"parsed_info"}, false)
+}
+
+// ----- 阶段 3.1:从 LLM 解析结果写回 snapshot 的 helper -----
+// registry.go 的 OutputValidator.Apply 已内联这些逻辑,这里保留 helper
+// 给旧 apply*LLM 函数复用(避免 5 处 Update lambda 重复)。
+
+func applyParseBriefFromResult(s *domain.TaskSnapshot, r *ParsedBriefResult) {
+	s.ParsedInfo = r.Info
+	s.Completeness = map[string]any{"enough": r.Enough, "missing": r.Missing}
+	addMessage(s, "[parse_brief] LLM 已解析需求")
+	pushStep(s, "parse_brief", []string{"parsed_info"}, false)
+}
+
+func applyPlanStrategyFromResult(s *domain.TaskSnapshot, r *PlanStrategyResult) {
+	s.StrategyDoc = r.Doc
+	s.NarrativeMode = r.NarrativeMode
+	addMessage(s, "[plan_strategy] LLM 已生成策略确认书")
+	pushStep(s, "plan_strategy", []string{"strategy_doc", "narrative_mode"}, false)
+}
+
+func applyBuildFrameworkFromResult(s *domain.TaskSnapshot, r *BuildFrameworkResult) {
+	s.FrameworkSkeleton = map[string]any{"sections": r.Sections}
+	addMessage(s, "[build_framework] LLM 已搭建目录骨架")
+	pushStep(s, "build_framework", []string{"framework_skeleton"}, false)
+}
+
+func applyReviewQualityFromResult(s *domain.TaskSnapshot, r *ReviewQualityResult) {
+	s.ReviewReport = r.Report
+	addMessage(s, "[review_quality] LLM 已完成审核")
+	pushStep(s, "review_quality", []string{"review_report"}, false)
 }
 
 func durationForType(t domain.TaskType) string {
@@ -162,16 +194,23 @@ func applyHumanFinal(s *domain.TaskSnapshot) {
 }
 
 // applyFinalize 汇总 final_output,status=done。
-func applyFinalize(s *domain.TaskSnapshot) {
+//
+// 阶段 4.6:写 artifact "final_output" + before/after 浅拷。
+func applyFinalize(s *domain.TaskSnapshot, taskArtifacts *sqlitestore.TaskArtifacts) {
 	body := s.EnrichedFramework
 	if body == "" {
 		body = "(空)"
 	}
+	before := shallowSnapshot(s, []string{"final_output", "status"})
 	s.FinalOutput = "# " + s.Title + "\n\n> 最终定稿 · 类型:" + string(s.TaskType) + "\n\n" + body
-	addMessage(s, "[finalize] 已定稿")
-	pushStep(s, "finalize", []string{"final_output"}, false)
 	s.Status = domain.TaskStatusDone
 	s.Pending = nil
+	if taskArtifacts != nil {
+		_, _ = writeArtifactKey(taskArtifacts, s, "final_output", s.FinalOutput, "markdown", "finalize", "")
+	}
+	after := shallowSnapshot(s, []string{"final_output", "status"})
+	addMessage(s, "[finalize] 已定稿")
+	pushStepWithDiff(s, "finalize", []string{"final_output"}, false, before, after)
 }
 
 // itoa 简易 int→string,避免引 strconv。
@@ -215,7 +254,7 @@ func itoa(n int) string {
 //     做法:先短 RLock 拷贝 snapshot 渲染 prompt,无锁调 LLM,最后短写锁 apply。
 //   - 每个 LLM 调用用 context.WithTimeout 包住(llmTimeout()),
 //     provider 挂起时快速失败为 failed,而不是永久卡住。
-func applyParseBriefLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource) error {
+func applyParseBriefLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource, taskArtifacts *sqlitestore.TaskArtifacts) error {
 	p := configMgr.Get()
 	if !p.Available() {
 		return errors.New("parse_brief: LLM provider 未配置")
@@ -236,16 +275,21 @@ func applyParseBriefLLM(ctx context.Context, taskID string, snapStore store.Task
 	}
 	providerName := p.Name()
 	_, _ = snapStore.Update(taskID, func(s *domain.TaskSnapshot) {
+		before := shallowSnapshot(s, []string{"parsed_info", "completeness"})
 		s.ParsedInfo = parsed.Info
 		s.Completeness = map[string]any{"enough": parsed.Enough, "missing": parsed.Missing}
+		if infoJSON, err := json.Marshal(parsed.Info); err == nil {
+			_, _ = writeArtifactKey(taskArtifacts, s, "parsed_info", string(infoJSON), "json", "parse_brief", "agent-clarifier")
+		}
+		after := shallowSnapshot(s, []string{"parsed_info", "completeness"})
 		addMessage(s, "[parse_brief] LLM 已解析需求 ("+providerName+")")
-		pushStep(s, "parse_brief", []string{"parsed_info"}, false)
+		pushStepWithDiff(s, "parse_brief", []string{"parsed_info"}, false, before, after)
 	})
 	return nil
 }
 
 // applyPlanStrategyLLM 见 applyPlanStrategy。
-func applyPlanStrategyLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource) error {
+func applyPlanStrategyLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource, taskArtifacts *sqlitestore.TaskArtifacts) error {
 	p := configMgr.Get()
 	if !p.Available() {
 		return errors.New("plan_strategy: LLM provider 未配置")
@@ -266,16 +310,19 @@ func applyPlanStrategyLLM(ctx context.Context, taskID string, snapStore store.Ta
 	}
 	providerName := p.Name()
 	_, _ = snapStore.Update(taskID, func(s *domain.TaskSnapshot) {
+		before := shallowSnapshot(s, []string{"strategy_doc", "narrative_mode"})
 		s.StrategyDoc = parsed.Doc
 		s.NarrativeMode = parsed.NarrativeMode
+		_, _ = writeArtifactKey(taskArtifacts, s, "strategy_doc", parsed.Doc, "markdown", "plan_strategy", "agent-planner")
+		after := shallowSnapshot(s, []string{"strategy_doc", "narrative_mode"})
 		addMessage(s, "[plan_strategy] LLM 已生成策略确认书 ("+providerName+")")
-		pushStep(s, "plan_strategy", []string{"strategy_doc", "narrative_mode"}, false)
+		pushStepWithDiff(s, "plan_strategy", []string{"strategy_doc", "narrative_mode"}, false, before, after)
 	})
 	return nil
 }
 
 // applyBuildFrameworkLLM 见 applyBuildFramework。
-func applyBuildFrameworkLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource) error {
+func applyBuildFrameworkLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource, taskArtifacts *sqlitestore.TaskArtifacts) error {
 	p := configMgr.Get()
 	if !p.Available() {
 		return errors.New("build_framework: LLM provider 未配置")
@@ -296,11 +343,17 @@ func applyBuildFrameworkLLM(ctx context.Context, taskID string, snapStore store.
 	}
 	sections := make([]map[string]any, len(parsed.Sections))
 	copy(sections, parsed.Sections)
+	skeleton := map[string]any{"sections": sections}
 	providerName := p.Name()
 	_, _ = snapStore.Update(taskID, func(s *domain.TaskSnapshot) {
-		s.FrameworkSkeleton = map[string]any{"sections": sections}
+		before := shallowSnapshot(s, []string{"framework_skeleton"})
+		s.FrameworkSkeleton = skeleton
+		if skJSON, err := json.Marshal(skeleton); err == nil {
+			_, _ = writeArtifactKey(taskArtifacts, s, "framework_skeleton", string(skJSON), "json", "build_framework", "agent-builder")
+		}
+		after := shallowSnapshot(s, []string{"framework_skeleton"})
 		addMessage(s, "[build_framework] LLM 已搭建 "+itoa(len(sections))+" 章节 ("+providerName+")")
-		pushStep(s, "build_framework", []string{"framework_skeleton"}, false)
+		pushStepWithDiff(s, "build_framework", []string{"framework_skeleton"}, false, before, after)
 	})
 	return nil
 }
@@ -310,7 +363,7 @@ func applyBuildFrameworkLLM(ctx context.Context, taskID string, snapStore store.
 //
 // 流式路径:若 ctx 中注入 TokenSink,则使用 p.Stream 逐 token 推送,
 // 结束后再写 snapshot;否则使用 p.Complete + runWithValidation(向后兼容)。
-func applyEnrichContentLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, feedback string, configMgr *llm.ConfigManager, agents agentSource, kbs kbSource, lit litSource) error {
+func applyEnrichContentLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, feedback string, configMgr *llm.ConfigManager, agents agentSource, kbs kbSource, lit litSource, taskArtifacts *sqlitestore.TaskArtifacts) error {
 	p := configMgr.Get()
 	if !p.Available() {
 		return errors.New("enrich_content: LLM provider 未配置")
@@ -328,7 +381,7 @@ func applyEnrichContentLLM(ctx context.Context, taskID string, snapStore store.T
 
 	// 流式路径:有 token sink 时逐 token 推送再收集完整文本
 	if sink := tokenSinkFromContext(ctx); sink != nil {
-		return enrichContentStream(ctx, taskID, snapStore, msgs, p, sink, sources)
+		return enrichContentStream(ctx, taskID, snapStore, msgs, p, sink, sources, taskArtifacts)
 	}
 
 	// 非流式路径(向后兼容,如单测直接跑 graph)
@@ -348,10 +401,19 @@ func applyEnrichContentLLM(ctx context.Context, taskID string, snapStore store.T
 	providerName := p.Name()
 	citations := citationsFromSources(parsed.Body, sources)
 	_, _ = snapStore.Update(taskID, func(s *domain.TaskSnapshot) {
+		// 阶段 4.6:before 浅拷 → 写 snapshot → 写 artifact → after 浅拷 → pushStep
+		before := shallowSnapshot(s, []string{"enriched_framework", "citations", "revision_count"})
 		s.EnrichedFramework = parsed.Body
 		s.Citations = citations
+		if _, err := writeArtifactKey(taskArtifacts, s, "enriched_framework", parsed.Body, "markdown", "enrich_content", "agent-enricher"); err != nil {
+			log.Printf("[artifact] write enriched_framework v?: %v", err)
+		}
+		if citationsJSON, _ := json.Marshal(citations); len(citationsJSON) > 2 {
+			_, _ = writeArtifactKey(taskArtifacts, s, "citations", string(citationsJSON), "json", "enrich_content", "agent-enricher")
+		}
+		after := shallowSnapshot(s, []string{"enriched_framework", "citations", "revision_count"})
 		addMessage(s, "[enrich_content] LLM 已填充内容 revision="+itoa(s.RevisionCount)+" ("+providerName+")")
-		pushStep(s, "enrich_content", []string{"enriched_framework"}, false)
+		pushStepWithDiff(s, "enrich_content", []string{"enriched_framework", "citations"}, false, before, after)
 	})
 	return nil
 }
@@ -360,7 +422,7 @@ func applyEnrichContentLLM(ctx context.Context, taskID string, snapStore store.T
 // TokenSink 广播给 SSE 订阅者,全部接收完后 parse + validate,写入 snapshot。
 // 任何失败(启动错 / 读流错 / 空输出 / 校验不过)都返回 error,不回落 mock。
 // sources 是从知识库检索的真实来源池(带 URL),用来回填 citations。
-func enrichContentStream(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, msgs []*schema.Message, p llm.Provider, sink TokenSink, sources []domain.KbSearchHit) error {
+func enrichContentStream(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, msgs []*schema.Message, p llm.Provider, sink TokenSink, sources []domain.KbSearchHit, taskArtifacts *sqlitestore.TaskArtifacts) error {
 	stream, err := p.Stream(ctx, msgs)
 	if err != nil {
 		log.Printf("[llm/enrich_content] stream start failed: %v", err)
@@ -407,10 +469,18 @@ func enrichContentStream(ctx context.Context, taskID string, snapStore store.Tas
 	providerName := p.Name()
 	citations := citationsFromSources(body, sources)
 	_, _ = snapStore.Update(taskID, func(s *domain.TaskSnapshot) {
+		before := shallowSnapshot(s, []string{"enriched_framework", "citations", "revision_count"})
 		s.EnrichedFramework = body
 		s.Citations = citations
+		if _, err := writeArtifactKey(taskArtifacts, s, "enriched_framework", body, "markdown", "enrich_content", "agent-enricher"); err != nil {
+			log.Printf("[artifact] write enriched_framework stream: %v", err)
+		}
+		if citationsJSON, _ := json.Marshal(citations); len(citationsJSON) > 2 {
+			_, _ = writeArtifactKey(taskArtifacts, s, "citations", string(citationsJSON), "json", "enrich_content", "agent-enricher")
+		}
+		after := shallowSnapshot(s, []string{"enriched_framework", "citations", "revision_count"})
 		addMessage(s, "[enrich_content] LLM 已填充内容(流式) revision="+itoa(s.RevisionCount)+" ("+providerName+")")
-		pushStep(s, "enrich_content", []string{"enriched_framework"}, false)
+		pushStepWithDiff(s, "enrich_content", []string{"enriched_framework", "citations"}, false, before, after)
 	})
 	return nil
 }
@@ -490,7 +560,7 @@ func citationsFromSources(body string, sources []domain.KbSearchHit) []domain.Ci
 // 流式路径:若 ctx 注入 TokenSink,审核意见逐字推给前端(像 enrich 一样),
 // 末尾解析哨兵裁定行。否则走非流式 JSON 契约路径(向后兼容单测)。
 // 任何失败都返回 error(不回落 mock)。
-func applyReviewQualityLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource) (string, error) {
+func applyReviewQualityLLM(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, configMgr *llm.ConfigManager, agents agentSource, taskArtifacts *sqlitestore.TaskArtifacts) (string, error) {
 	p := configMgr.Get()
 	if !p.Available() {
 		return "", errors.New("review_quality: LLM provider 未配置")
@@ -506,7 +576,7 @@ func applyReviewQualityLLM(ctx context.Context, taskID string, snapStore store.T
 	// 流式路径
 	if sink := tokenSinkFromContext(ctx); sink != nil {
 		msgs := renderReviewQualityStreamMessages(snap, agents)
-		return reviewQualityStream(ctx, taskID, snapStore, msgs, p, sink)
+		return reviewQualityStream(ctx, taskID, snapStore, msgs, p, sink, taskArtifacts)
 	}
 
 	// 非流式路径(JSON 契约)
@@ -519,9 +589,14 @@ func applyReviewQualityLLM(ctx context.Context, taskID string, snapStore store.T
 	}
 	providerName := p.Name()
 	_, _ = snapStore.Update(taskID, func(s *domain.TaskSnapshot) {
+		before := shallowSnapshot(s, []string{"review_report"})
 		s.ReviewReport = parsed.Report
+		if rrJSON, err := json.Marshal(parsed.Report); err == nil {
+			_, _ = writeArtifactKey(taskArtifacts, s, "review_report", string(rrJSON), "json", "review_quality", "agent-reviewer")
+		}
+		after := shallowSnapshot(s, []string{"review_report"})
 		addMessage(s, "[review_quality] LLM verdict="+parsed.Verdict+" ("+providerName+")")
-		pushStep(s, "review_quality", []string{"review_report"}, false)
+		pushStepWithDiff(s, "review_quality", []string{"review_report"}, false, before, after)
 	})
 	return parsed.Verdict, nil
 }
@@ -529,7 +604,7 @@ func applyReviewQualityLLM(ctx context.Context, taskID string, snapStore store.T
 // reviewQualityStream 流式审核:逐 token 广播人类可读的审核意见,
 // 结束后从累积文本解析哨兵裁定行(裁定: pass|revise|redo)与修改建议。
 // 任何失败都返回 error,不回落 mock。
-func reviewQualityStream(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, msgs []*schema.Message, p llm.Provider, sink TokenSink) (string, error) {
+func reviewQualityStream(ctx context.Context, taskID string, snapStore store.TaskSnapshotStore, msgs []*schema.Message, p llm.Provider, sink TokenSink, taskArtifacts *sqlitestore.TaskArtifacts) (string, error) {
 	stream, err := p.Stream(ctx, msgs)
 	if err != nil {
 		log.Printf("[llm/review_quality] stream start failed: %v", err)
@@ -560,7 +635,7 @@ func reviewQualityStream(ctx context.Context, taskID string, snapStore store.Tas
 		return "", errors.New("review_quality: 流式输出为空")
 	}
 
-	verdict, advices, err := parseReviewStreamText(text)
+	verdict, advices, targetNode, err := parseReviewStreamText(text)
 	if err != nil {
 		log.Printf("[llm/review_quality] parse verdict failed: %v", err)
 		return "", err
@@ -568,15 +643,22 @@ func reviewQualityStream(ctx context.Context, taskID string, snapStore store.Tas
 
 	providerName := p.Name()
 	_, _ = snapStore.Update(taskID, func(s *domain.TaskSnapshot) {
-		s.ReviewReport = &domain.ReviewReport{
+		before := shallowSnapshot(s, []string{"review_report"})
+		report := &domain.ReviewReport{
 			Overall:       verdict,
 			StrategyItems: []domain.ReviewItem{},
 			QualityItems:  []domain.ReviewItem{},
 			Advices:       advices,
+			TargetNode:    targetNode,
 			Summary:       text,
 		}
+		s.ReviewReport = report
+		if rrJSON, err := json.Marshal(report); err == nil {
+			_, _ = writeArtifactKey(taskArtifacts, s, "review_report", string(rrJSON), "json", "review_quality", "agent-reviewer")
+		}
+		after := shallowSnapshot(s, []string{"review_report"})
 		addMessage(s, "[review_quality] LLM verdict="+verdict+"(流式) ("+providerName+")")
-		pushStep(s, "review_quality", []string{"review_report"}, false)
+		pushStepWithDiff(s, "review_quality", []string{"review_report"}, false, before, after)
 	})
 	return verdict, nil
 }

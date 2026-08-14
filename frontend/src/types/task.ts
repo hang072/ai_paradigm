@@ -20,6 +20,17 @@ export interface StepHistoryItem {
   node_id: string;
   after_keys: string[];
   skipped: boolean;
+  /** 阶段 4 引入:节点入口/出口的 TaskSnapshot 浅拷贝,前端可 diff 节点前后变化 */
+  before_snapshot?: Record<string, any>;
+  after_snapshot?: Record<string, any>;
+}
+
+/** 阶段 4 引入:TaskSnapshot.Artifacts 数组元素 */
+export interface ArtifactKeyRef {
+  key: string;
+  current_version: number;
+  total_versions: number;
+  latest_url: string;
 }
 
 /** 内容填充阶段引用的一条真实来源(带可点击链接) */
@@ -62,6 +73,8 @@ export interface TaskSnapshot {
   error_message?: string;
   step_history: StepHistoryItem[];
   spec: TaskSpec;
+  /** 阶段 4 引入:artifact 索引。key → 当前版本号 + 总版本数 + 列表 URL。 */
+  artifacts?: Record<string, ArtifactKeyRef>;
 }
 
 /** 列表页用的摘要 */

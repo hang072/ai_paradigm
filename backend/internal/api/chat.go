@@ -27,8 +27,8 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/go-chi/chi/v5"
 	"paradigm_eino_backend/internal/domain"
+	"paradigm_eino_backend/internal/embedding"
 	"paradigm_eino_backend/internal/fixtures"
-	"paradigm_eino_backend/internal/kb"
 	"paradigm_eino_backend/internal/llm"
 	"paradigm_eino_backend/internal/pubmed"
 	"paradigm_eino_backend/internal/store"
@@ -683,8 +683,10 @@ func buildToolCallPreviews(ctx context.Context, query string, tools []string, kb
 		if knowledge == nil {
 			call.OutputPreview = "(知识库未启用)"
 		} else {
-			hits := searchKBWithStore(knowledge, query, kbIDs)
-			if len(hits) == 0 {
+			hits, err := searchKBWithStore(ctx, knowledge, query, kbIDs)
+			if err != nil {
+				call.OutputPreview = "(search_kb 失败: " + err.Error() + ")"
+			} else if len(hits) == 0 {
 				if len(kbIDs) == 0 {
 					call.OutputPreview = "(未挂载知识库,search_kb 未命中)"
 				} else {
@@ -712,19 +714,21 @@ func buildToolCallPreviews(ctx context.Context, query string, tools []string, kb
 	return calls
 }
 
-// searchKBWithStore 收集 kbIDs 对应的 KB 交给 kb.Search;空 kbIDs 搜全部。
-func searchKBWithStore(s store.Store[*domain.KnowledgeBase], query string, kbIDs []string) []domain.KbSearchHit {
-	var scope []*domain.KnowledgeBase
-	if len(kbIDs) == 0 {
-		scope = s.List()
-	} else {
-		for _, id := range kbIDs {
-			if k, ok := s.Get(id); ok {
-				scope = append(scope, k)
-			}
-		}
+// searchKBWithStore 走 embedding.Search(向量检索)。空 kbIDs 搜全部。
+// Milvus 不可用时返 error(用户决策: hard dep, 不降级 SQL)。
+//
+// 用 package-level vars(pkgEmbedder / pkgMilvusCli) 拿依赖,避免把 3 个
+// embedding 参数一路透传到每个 chat 工具函数。
+func searchKBWithStore(
+	ctx context.Context,
+	s store.Store[*domain.KnowledgeBase],
+	query string,
+	kbIDs []string,
+) ([]embedding.SearchHit, error) {
+	if pkgEmbedder == nil || pkgMilvusCli == nil {
+		return nil, fmt.Errorf("embedding 未初始化(后端未配置 Milvus / LLM)")
 	}
-	return kb.Search(scope, query)
+	return embedding.Search(ctx, pkgEmbedder, pkgMilvusCli, s, query, kbIDs, 6)
 }
 
 // ==============================
@@ -808,7 +812,7 @@ func (t *searchKBTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func (t *searchKBTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+func (t *searchKBTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	var args struct {
 		Query string   `json:"query"`
 		KBIDs []string `json:"kb_ids"`
@@ -825,7 +829,12 @@ func (t *searchKBTool) InvokableRun(_ context.Context, argumentsInJSON string, _
 	if len(kbIDs) == 0 {
 		kbIDs = t.defaultKBIDs
 	}
-	hits := searchKBWithStore(t.store, args.Query, kbIDs)
+	hits, err := searchKBWithStore(ctx, t.store, args.Query, kbIDs)
+	if err != nil {
+		// 工具调用出错 → 返带 note 的 payload, 让 LLM 知道原因
+		out, _ := json.Marshal(map[string]any{"hits": []any{}, "note": "search_kb error: " + err.Error()})
+		return string(out), nil
+	}
 	payload := map[string]any{"hits": hits}
 	out, err := json.Marshal(payload)
 	if err != nil {

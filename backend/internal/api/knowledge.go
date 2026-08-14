@@ -7,28 +7,40 @@
 //   PUT/DEL       /api/kb/:id/docs/:docId
 //   POST          /api/kb/search   { query, kb_ids } → []KbSearchHit
 //
+// 阶段 5 改动:
+//   - 签名加 *sqlite.KbUploads 参数,PUT/DELETE 文档时级联删 blob。
+//   - 任何 PUT 都删 blob —— 简化语义(blob 与新文本可能不一致,用户重新上传即可)。
+//   - 见 kb_uploads.go 注释里的"已知折中"。
+//
 // 注意路由挂载顺序:/api/kb/search 与 /api/kb/:id/docs 必须挂在 /api/kb/:id 之前,
 // 否则 chi 会先匹配到 :id。见前端约定:frontend/src/api/mock/index.ts。
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"paradigm_eino_backend/internal/domain"
-	"paradigm_eino_backend/internal/kb"
+	"paradigm_eino_backend/internal/embedding"
 	"paradigm_eino_backend/internal/store"
+	"paradigm_eino_backend/internal/store/sqlite"
 )
 
 func nowKbStr() string {
 	return time.Now().Format("2006-01-02 15:04:05")
 }
 
-func mountKnowledge(r chi.Router, s store.Store[*domain.KnowledgeBase]) {
+func mountKnowledge(
+	r chi.Router,
+	s store.Store[*domain.KnowledgeBase],
+	uploads *sqlite.KbUploads,
+) {
 	// ===== search:必须在 /kb/{id} 之前注册,否则 chi 会把 "search" 当成 id =====
 	r.Post("/kb/search", func(w http.ResponseWriter, req *http.Request) {
 		var body struct {
@@ -39,10 +51,14 @@ func mountKnowledge(r chi.Router, s store.Store[*domain.KnowledgeBase]) {
 			respondErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 			return
 		}
-		hits := runSearch(s, body.Query, body.KBIDs)
+		hits, err := runSearch(req.Context(), s, body.Query, body.KBIDs)
+		if err != nil {
+			// Milvus 不可用 / embedding 失败 → 503(用户决策: hard dep)
+			respondErr(w, http.StatusServiceUnavailable, "向量检索暂不可用: "+err.Error())
+			return
+		}
 		if hits == nil {
-			// 保证返回 [] 而不是 null
-			hits = []domain.KbSearchHit{}
+			hits = []embedding.SearchHit{}
 		}
 		respondJSON(w, http.StatusOK, hits)
 	})
@@ -159,6 +175,7 @@ func mountKnowledge(r chi.Router, s store.Store[*domain.KnowledgeBase]) {
 			respondStoreErr(w, err, "知识库", "内置知识库不可修改")
 			return
 		}
+		enqueueAfterCreate(created.ID, created.Type) // 阶段 5 续 3:后台 embedding
 		respondJSON(w, http.StatusOK, created)
 	})
 
@@ -210,6 +227,11 @@ func mountKnowledge(r chi.Router, s store.Store[*domain.KnowledgeBase]) {
 			respondErr(w, http.StatusNotFound, "文档不存在")
 			return
 		}
+		// 阶段 5:任何编辑都删 blob —— 简化语义(blob 与新文本可能不一致,
+		// 用户重新上传即可)。ErrUploadNotFound 正常,忽略。
+		if uploads != nil {
+			_ = uploads.Delete(docID)
+		}
 		respondJSON(w, http.StatusOK, updated)
 	})
 
@@ -239,26 +261,27 @@ func mountKnowledge(r chi.Router, s store.Store[*domain.KnowledgeBase]) {
 			respondErr(w, http.StatusNotFound, "文档不存在")
 			return
 		}
+		// 阶段 5:删 doc 时级联删 blob。
+		if uploads != nil {
+			_ = uploads.Delete(docID)
+		}
 		respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 }
 
-// runSearch 收集要查的 KB 集合,交给 kb.Search 计算。
-// 若 kbIDs 为空则搜全部。
-func runSearch(s store.Store[*domain.KnowledgeBase], query string, kbIDs []string) []domain.KbSearchHit {
-	var scope []*domain.KnowledgeBase
-	if len(kbIDs) == 0 {
-		scope = s.List()
-	} else {
-		for _, id := range kbIDs {
-			kbObj, ok := s.Get(id)
-			if !ok {
-				continue
-			}
-			scope = append(scope, kbObj)
-		}
+// runSearch 包装 embedding.Search,从 package-level vars 拿 Embedder / Milvus。
+// 旧的 kb.Search(SQL 关键词) 路径已废弃,保留在 internal/kb/search.go
+// 留作内部测试用,不再被 handler 调用。
+func runSearch(
+	ctx context.Context,
+	s store.Store[*domain.KnowledgeBase],
+	query string,
+	kbIDs []string,
+) ([]embedding.SearchHit, error) {
+	if pkgEmbedder == nil || pkgMilvusCli == nil {
+		return nil, fmt.Errorf("embedding 未初始化(后端未配置 Milvus / LLM)")
 	}
-	return kb.Search(scope, query)
+	return embedding.Search(ctx, pkgEmbedder, pkgMilvusCli, s, query, kbIDs, 6)
 }
 
 // randomHex4 生成 8 位 hex,给新文档做 id。

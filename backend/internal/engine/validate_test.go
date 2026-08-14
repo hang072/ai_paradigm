@@ -322,6 +322,52 @@ func TestValidateReviewQuality(t *testing.T) {
 	if err := validateReviewQuality(badItem); err == nil {
 		t.Errorf("invalid item verdict should fail")
 	}
+
+	// ─── 阶段 6 workbuddy 借鉴:target_node 白名单校验 ─────────
+	// revise + target_node 合法值 → 通过
+	reviseValidTarget := &ReviewQualityResult{
+		Verdict: "revise",
+		Report: &domain.ReviewReport{
+			Overall:    "revise",
+			Advices:    []string{"改一改"},
+			TargetNode: "plan_strategy",
+		},
+	}
+	if err := validateReviewQuality(reviseValidTarget); err != nil {
+		t.Errorf("revise + target=plan_strategy: %v", err)
+	}
+	if reviseValidTarget.Report.TargetNode != "plan_strategy" {
+		t.Errorf("合法 target_node 不应被改写,实际=%q", reviseValidTarget.Report.TargetNode)
+	}
+
+	// revise + target_node 非法值 → 降级为 enrich_content,不报错
+	reviseBadTarget := &ReviewQualityResult{
+		Verdict: "revise",
+		Report: &domain.ReviewReport{
+			Overall:    "revise",
+			Advices:    []string{"改一改"},
+			TargetNode: "magic_node", // 非法
+		},
+	}
+	if err := validateReviewQuality(reviseBadTarget); err != nil {
+		t.Errorf("revise + 非法 target_node 应降级不报错,实际 error: %v", err)
+	}
+	if reviseBadTarget.Report.TargetNode != "enrich_content" {
+		t.Errorf("非法 target_node 应降级为 enrich_content,实际=%q", reviseBadTarget.Report.TargetNode)
+	}
+
+	// revise + target_node 缺省 → 通过(保持空字符串,引擎后续默认 enrich_content)
+	reviseEmptyTarget := &ReviewQualityResult{
+		Verdict: "revise",
+		Report: &domain.ReviewReport{
+			Overall:    "revise",
+			Advices:    []string{"改一改"},
+			TargetNode: "",
+		},
+	}
+	if err := validateReviewQuality(reviseEmptyTarget); err != nil {
+		t.Errorf("revise + 空 target_node 应通过,实际 error: %v", err)
+	}
 }
 
 func TestParseFrameworkResponse_NestedEnvelope(t *testing.T) {

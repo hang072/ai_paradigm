@@ -10,6 +10,7 @@ import (
 	"paradigm_eino_backend/internal/domain"
 	"paradigm_eino_backend/internal/llm"
 	"paradigm_eino_backend/internal/store"
+	sqlitestore "paradigm_eino_backend/internal/store/sqlite"
 )
 
 // 节点名常量。与前端 fixture 里的 NodeInstance.id 保持一致,便于日志排错。
@@ -73,6 +74,7 @@ func BuildTaskGraph(
 	agentStore agentSource,
 	kbStore kbSource,
 	litStore litSource,
+	taskArtifacts *sqlitestore.TaskArtifacts,
 ) (compose.Runnable[string, string], error) {
 	g := compose.NewGraph[string, string](
 		compose.WithGenLocalState(func(_ context.Context) *TaskLocalState {
@@ -100,7 +102,7 @@ func BuildTaskGraph(
 				return "", fmt.Errorf("no task_id in ctx")
 			}
 			emitPhase(ctx, nodeParseBrief, "正在解析需求…")
-			if err := applyParseBriefLLM(ctx, taskID, snapshotStore, configMgr, agentStore); err != nil {
+			if err := applyParseBriefLLM(ctx, taskID, snapshotStore, configMgr, agentStore, taskArtifacts); err != nil {
 				return "", err
 			}
 			emitProgress(ctx)
@@ -179,7 +181,7 @@ func BuildTaskGraph(
 				return "", fmt.Errorf("no task_id in ctx")
 			}
 			emitPhase(ctx, nodePlanStrategy, "正在生成策略确认书…")
-			if err := applyPlanStrategyLLM(ctx, taskID, snapshotStore, configMgr, agentStore); err != nil {
+			if err := applyPlanStrategyLLM(ctx, taskID, snapshotStore, configMgr, agentStore, taskArtifacts); err != nil {
 				return "", err
 			}
 			emitProgress(ctx)
@@ -246,7 +248,7 @@ func BuildTaskGraph(
 				return "", fmt.Errorf("no task_id in ctx")
 			}
 			emitPhase(ctx, nodeBuildFramework, "正在搭建目录骨架…")
-			if err := applyBuildFrameworkLLM(ctx, taskID, snapshotStore, configMgr, agentStore); err != nil {
+			if err := applyBuildFrameworkLLM(ctx, taskID, snapshotStore, configMgr, agentStore, taskArtifacts); err != nil {
 				return "", err
 			}
 			emitProgress(ctx)
@@ -280,7 +282,7 @@ func BuildTaskGraph(
 				feedback = resumeAnswer
 			}
 			emitPhase(ctx, nodeEnrichContent, "正在填充章节内容…")
-			if err := applyEnrichContentLLM(ctx, taskID, snapshotStore, feedback, configMgr, agentStore, kbStore, litStore); err != nil {
+			if err := applyEnrichContentLLM(ctx, taskID, snapshotStore, feedback, configMgr, agentStore, kbStore, litStore, taskArtifacts); err != nil {
 				return "", err
 			}
 			emitProgress(ctx)
@@ -298,7 +300,7 @@ func BuildTaskGraph(
 				return "", fmt.Errorf("no task_id in ctx")
 			}
 			emitPhase(ctx, nodeReviewQuality, "正在综合审核…")
-			verdict, err := applyReviewQualityLLM(ctx, taskID, snapshotStore, configMgr, agentStore)
+			verdict, err := applyReviewQualityLLM(ctx, taskID, snapshotStore, configMgr, agentStore, taskArtifacts)
 			if err != nil {
 				return "", err
 			}
@@ -372,7 +374,7 @@ func BuildTaskGraph(
 	// ---- finalize ----
 	if err := g.AddLambdaNode(nodeFinalize,
 		compose.InvokableLambda(func(ctx context.Context, _ string) (string, error) {
-			return "done", mutSnap(ctx, applyFinalize)
+			return "done", mutSnap(ctx, func(s *domain.TaskSnapshot) { applyFinalize(s, taskArtifacts) })
 		}),
 	); err != nil {
 		return nil, err
@@ -443,7 +445,21 @@ func BuildTaskGraph(
 		return nil, err
 	}
 
-	// review_quality → branch(verdict)
+	// review_quality → branch(verdict × target_node,阶段 6 workbuddy 借鉴)
+	//
+	// target_node 决定回退目标(由 reviewer 在 review_report 里输出):
+	//   "plan_strategy"   → 回策略规划重做
+	//   "build_framework" → 回框架搭建重做
+	//   "enrich_content"  → 默认:回内容填充修订(revision_count++)
+	//   "human_final"     → 跳过人机交互(不增 revision_count)
+	//   ""                → 默认 enrich_content
+	//
+	// 整体逻辑:
+	//   - overall=pass/redo → human_final(不分支)
+	//   - overall=revise + revision<2 → 按 target_node 选下游
+	//   - overall=revise + revision≥2 → 强制 human_final
+	//   - revision_count++ 统一在分支函数里做(原 bump_revision 节点的逻辑),
+	//     human_final / plan_strategy 重做时仍 +1,以保留 MAX_REVISION 硬限
 	reviewBranch := func(ctx context.Context, verdict string) (string, error) {
 		if verdict != "revise" {
 			return nodeHumanFinal, nil
@@ -453,20 +469,42 @@ func BuildTaskGraph(
 		if !ok {
 			return nodeHumanFinal, nil
 		}
-		if snap.RevisionCount < 2 {
-			return nodeBumpRevision, nil
+		// 阶段 6:先读 target_node,判 revision 上限
+		if snap.RevisionCount >= 2 {
+			_, _ = snapshotStore.Update(taskID, applyForcedHumanFinal)
+			return nodeHumanFinal, nil
 		}
-		_, _ = snapshotStore.Update(taskID, applyForcedHumanFinal)
-		return nodeHumanFinal, nil
+		// revision_count++(保留 MAX_REVISION 硬限,不绕过审稿循环)
+		_, _ = snapshotStore.Update(taskID, applyBumpRevision)
+		// 按 target_node 路由
+		switch snap.ReviewReport.TargetNode {
+		case "plan_strategy":
+			// 回策略规划:经 PreStrategy → plan_strategy → confirm_strategy interrupt,
+			// 保留用户重新确认策略的机会(不绕过 confirm_strategy)
+			return nodePreStrategy, nil
+		case "build_framework":
+			// 回框架搭建:不触发 confirm_strategy(骨架是内部产物,用户不需要再确认)
+			return nodeBuildFramework, nil
+		case "human_final":
+			return nodeHumanFinal, nil
+		case "", "enrich_content":
+			return nodeEnrichContent, nil
+		default:
+			// Validator 已降级,这里再保一道
+			return nodeEnrichContent, nil
+		}
 	}
 	if err := g.AddBranch(nodeReviewQuality, compose.NewGraphBranch(reviewBranch, map[string]bool{
-		nodeHumanFinal:   true,
-		nodeBumpRevision: true,
+		nodeHumanFinal:     true,
+		nodeEnrichContent:  true,
+		nodeBuildFramework: true,
+		nodePreStrategy:    true,
 	})); err != nil {
 		return nil, err
 	}
 
 	// bump_revision → enrich_content (loop)
+	// 保留:human_final 的 revise 反馈路径仍走这里(revision_count++ 后回 enrich_content)
 	if err := g.AddEdge(nodeBumpRevision, nodeEnrichContent); err != nil {
 		return nil, err
 	}

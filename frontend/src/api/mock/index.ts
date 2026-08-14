@@ -45,6 +45,9 @@ const routes: Handler[] = [
   { method: 'PUT', match: /^\/api\/templates\/(.+)$/, handle: (m, b) => engine.updateTemplate(m[1], b) },
   { method: 'DELETE', match: /^\/api\/templates\/(.+)$/, handle: (m) => (engine.deleteTemplate(m[1]), { ok: true }) },
 
+  // 阶段 3.3:Planner(mock 引擎走 static 兜底,因为浏览器无 LLM)
+  { method: 'POST', match: /^\/api\/planner\/compose$/, handle: (_m, b) => engine.composePlanner(b) },
+
   // Skills
   { method: 'GET', match: /^\/api\/skills\/?$/, handle: () => engine.listSkills() },
   { method: 'GET', match: /^\/api\/skills\/(.+)$/, handle: (m) => requireEntity(engine.getSkill(m[1]), 'Skill') },
@@ -60,6 +63,91 @@ const routes: Handler[] = [
     handle: (_m, b) => engine.searchKb(String(b?.query ?? ''), Array.isArray(b?.kb_ids) ? b.kb_ids : []),
   },
   { method: 'POST', match: /^\/api\/kb\/?$/, handle: (_m, b) => engine.createKb(b) },
+  // 阶段 5:文档上传/下载真实文件 —— mock 不实现。
+  // 排到 /docs/([^/]+) 之前(/upload 与 /blob 是更具体的字面段)。
+  // 正常 UI 在 mock 模式会隐藏上传 Tab,这里只兜底万一被直连。
+  // 续:批量上传的预检也走 501。
+  {
+    method: 'POST',
+    match: /^\/api\/kb\/([^/]+)\/docs\/upload\/precheck$/,
+    handle: () => {
+      const err: any = new Error('预检需要连接真实后端 (VITE_USE_MOCK=false)');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'POST',
+    match: /^\/api\/kb\/([^/]+)\/docs\/upload\/sessions$/,
+    handle: () => {
+      const err: any = new Error('分片上传需要连接真实后端 (VITE_USE_MOCK=false)');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'PUT',
+    match: /^\/api\/kb\/([^/]+)\/docs\/upload\/sessions\/([^/]+)\/chunks\/([^/]+)$/,
+    handle: () => {
+      const err: any = new Error('分片上传需要连接真实后端 (VITE_USE_MOCK=false)');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'POST',
+    match: /^\/api\/kb\/([^/]+)\/docs\/upload\/sessions\/([^/]+)\/commit$/,
+    handle: () => {
+      const err: any = new Error('分片上传需要连接真实后端 (VITE_USE_MOCK=false)');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'DELETE',
+    match: /^\/api\/kb\/([^/]+)\/docs\/upload\/sessions\/([^/]+)$/,
+    handle: () => {
+      const err: any = new Error('分片上传需要连接真实后端 (VITE_USE_MOCK=false)');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'GET',
+    match: /^\/api\/kb\/([^/]+)\/docs\/upload\/sessions\/([^/]+)$/,
+    handle: () => {
+      const err: any = new Error('分片上传需要连接真实后端 (VITE_USE_MOCK=false)');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'POST',
+    match: /^\/api\/kb\/([^/]+)\/docs\/upload$/,
+    handle: () => {
+      const err: any = new Error('上传文档需要连接真实后端 (VITE_USE_MOCK=false)');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'GET',
+    match: /^\/api\/kb\/([^/]+)\/docs\/([^/]+)\/blob$/,
+    handle: () => {
+      const err: any = new Error('mock 模式不提供文件下载');
+      err.status = 501;
+      throw err;
+    },
+  },
+  {
+    method: 'DELETE',
+    match: /^\/api\/kb\/([^/]+)\/docs\/([^/]+)\/blob$/,
+    handle: () => {
+      const err: any = new Error('mock 模式不支持');
+      err.status = 501;
+      throw err;
+    },
+  },
   {
     method: 'POST',
     match: /^\/api\/kb\/([^/]+)\/docs$/,

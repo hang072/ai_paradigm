@@ -394,8 +394,18 @@ func renderReviewQualityMessages(s *domain.TaskSnapshot, agents agentSource) []*
   "overall": "pass" | "revise" | "redo",
   "strategy_items": [{"dimension": "维度", "verdict": "pass|warn|fail", "note": "备注"}],
   "quality_items":  [{"dimension": "维度", "verdict": "pass|warn|fail", "note": "备注"}],
-  "advices": ["修改建议 1", "修改建议 2"]
+  "advices": ["修改建议 1", "修改建议 2"],
+  "target_node": "plan_strategy" | "build_framework" | "enrich_content" | "human_final"
 }
+
+智能路由(阶段 6 workbuddy 借鉴):除 overall 外,必须输出 "target_node",告诉引擎"问题出在哪里,应回退到哪个上游节点重做":
+- strategy_items 出现 fail(尤其是叙事一致性、配比严重偏离)→ "plan_strategy"
+- quality_items 出现 "结构合理性" fail → "build_framework"
+- 其它内容 / 文献 / 时长问题 → "enrich_content"(默认兜底)
+- 重大策略 / 概念错误需用户介入 → "human_final"(慎用)
+
+target_node 从上述 4 个中选一;非法值引擎会降级为 "enrich_content"。
+target_node 不影响 overall;overall=pass 时 target_node 可省略,引擎不会消费。
 
 判定标准:
 - pass:两类维度均合格
@@ -421,6 +431,7 @@ func parseReviewResponse(text string) (*ReviewQualityResult, error) {
 		StrategyItems []domain.ReviewItem `json:"strategy_items"`
 		QualityItems  []domain.ReviewItem `json:"quality_items"`
 		Advices       []string            `json:"advices"`
+		TargetNode    string              `json:"target_node"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
@@ -440,12 +451,15 @@ func parseReviewResponse(text string) (*ReviewQualityResult, error) {
 	if payload.Advices == nil {
 		payload.Advices = []string{}
 	}
+	// 阶段 6:target_node 解析(Validator 后续会再次白名单校验并降级)
+	target := strings.TrimSpace(payload.TargetNode)
 	return &ReviewQualityResult{
 		Report: &domain.ReviewReport{
 			Overall:       overall,
 			StrategyItems: payload.StrategyItems,
 			QualityItems:  payload.QualityItems,
 			Advices:       payload.Advices,
+			TargetNode:    target,
 		},
 		Verdict: overall,
 	}, nil
@@ -482,6 +496,15 @@ func renderReviewQualityStreamMessages(s *domain.TaskSnapshot, agents agentSourc
 - 若裁定为 revise 或 redo,紧接着逐行列出可执行的修改建议,每行以 "- " 起头
 - 若裁定为 pass,不要输出任何修改建议
 
+智能路由(阶段 6):除"裁定"行外,还需另起一行输出"回流到: <kind>"哨兵,告诉引擎应回退到哪个上游节点重做:
+  回流到: plan_strategy        (策略 / 叙事 / 配比严重偏离)
+  或 回流到: build_framework    (结构骨架与 skeleton 不对齐)
+  或 回流到: enrich_content     (内容 / 文献 / 时长问题;默认兜底)
+  或 回流到: human_final        (重大策略 / 概念错误需用户介入;慎用)
+
+若裁定为 pass,"回流到:"行可省略。
+回流到: 行的 kind 必须从 {plan_strategy, build_framework, enrich_content, human_final} 中选一;非法值引擎会降级为 enrich_content。
+
 判定标准:
 - pass:两类维度均合格
 - revise:内容质量有小问题,给出可执行建议
@@ -493,17 +516,25 @@ func renderReviewQualityStreamMessages(s *domain.TaskSnapshot, agents agentSourc
 // reviewVerdictRe 匹配哨兵裁定行:"裁定: pass" / "裁定：revise" 等(全/半角冒号皆可)。
 var reviewVerdictRe = regexp.MustCompile(`(?m)^\s*裁定\s*[:：]\s*(pass|revise|redo)\s*$`)
 
-// parseReviewStreamText 从流式审核正文里解析裁定与修改建议。
+// reviewTargetRe 匹配阶段 6 新增的"回流到:"哨兵行(可选)。
+// 整体可省略(verdict=pass 时),未省略时必须形如 "回流到: enrich_content" 等。
+var reviewTargetRe = regexp.MustCompile(`(?m)^\s*回流到\s*[:：]\s*(\S+)\s*$`)
+
+// parseReviewStreamText 从流式审核正文里解析裁定、修改建议与回流目标。
 //   - 找哨兵行 "裁定: pass|revise|redo";找不到 → error(不猜)
+//   - 找哨兵行 "回流到: <kind>";找不到 → targetNode = ""(Validator 后续默认 enrich_content)
 //   - verdict != pass 时,收集哨兵行之后以 "- " 起头的行作为 advices;为空 → error
 //   - verdict == pass 时 advices 恒为空
-func parseReviewStreamText(text string) (verdict string, advices []string, err error) {
+func parseReviewStreamText(text string) (verdict string, advices []string, targetNode string, err error) {
 	m := reviewVerdictRe.FindStringSubmatchIndex(text)
 	if m == nil {
-		return "", nil, errors.New("review_quality: 未找到裁定哨兵行(裁定: pass|revise|redo)")
+		return "", nil, "", errors.New("review_quality: 未找到裁定哨兵行(裁定: pass|revise|redo)")
 	}
 	verdict = strings.ToLower(text[m[2]:m[3]])
 	advices = []string{}
+	if t := reviewTargetRe.FindStringSubmatch(text); t != nil {
+		targetNode = strings.TrimSpace(t[1])
+	}
 	if verdict != "pass" {
 		tail := text[m[1]:] // 哨兵行之后的内容
 		for _, line := range strings.Split(tail, "\n") {
@@ -515,10 +546,10 @@ func parseReviewStreamText(text string) (verdict string, advices []string, err e
 			}
 		}
 		if len(advices) == 0 {
-			return "", nil, fmt.Errorf("review_quality: verdict=%s 但未解析到修改建议", verdict)
+			return "", nil, "", fmt.Errorf("review_quality: verdict=%s 但未解析到修改建议", verdict)
 		}
 	}
-	return verdict, advices, nil
+	return verdict, advices, targetNode, nil
 }
 
 // ==================== JSON 提取 & 辅助 ====================

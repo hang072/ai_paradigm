@@ -1,17 +1,20 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   App as AntApp,
   Alert,
   Button,
+  Card,
   Descriptions,
   Drawer,
   Empty,
+  Select,
   Space,
   Statistic,
   Tag,
   Typography,
 } from 'antd';
 import {
+  BranchesOutlined,
   ClockCircleOutlined,
   CopyOutlined,
   ThunderboltFilled,
@@ -21,7 +24,9 @@ import type { NodeDef } from '../../types/node';
 import type { AgentDef } from '../../types/agent';
 import type { ReviewReport } from '../../types/review';
 import { MarkdownView } from '../../components/MarkdownView';
+import AgentAvatar from '../../components/AgentAvatar';
 import { fromNow } from '../../utils/time';
+import { ArtifactsApi } from '../../api/artifacts';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -197,7 +202,8 @@ export function NodeDetailDrawer(props: NodeDetailDrawerProps) {
               <Descriptions.Item label="绑定 Agent" span={2}>
                 {agent ? (
                   <Space>
-                    <Tag color="blue">{agent.name}</Tag>
+                    <AgentAvatar agent={agent} size={20} />
+                    <Tag color="blue">{agent.display_name ?? agent.name}</Tag>
                     <Text type="secondary" style={{ fontSize: 11 }}>
                       {agent.id}
                     </Text>
@@ -271,9 +277,125 @@ export function NodeDetailDrawer(props: NodeDetailDrawerProps) {
               </div>
             )}
           </section>
+
+          {/* 阶段 4:工件历史(共享工件仓库) */}
+          {task.artifacts && Object.keys(task.artifacts).length > 0 && (
+            <section style={{ marginTop: 16 }}>
+              <Title level={5} style={{ marginTop: 0 }}>
+                工件历史(Artifact Store)
+              </Title>
+              <ArtifactPanel task={task} />
+            </section>
+          )}
         </div>
       )}
     </Drawer>
+  );
+}
+
+/**
+ * 阶段 4:工件面板 —— 列出 task.artifacts 的所有 key,每个 key 可点开看
+ * 版本列表 + 任意两版本 unified diff。
+ */
+function ArtifactPanel({ task }: { task: TaskSnapshot }) {
+  const entries = Object.values(task.artifacts ?? {});
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {entries.map((ref) => (
+        <Card
+          key={ref.key}
+          size="small"
+          title={
+            <Space>
+              <Text strong>{ref.key}</Text>
+              <Tag>v{ref.current_version} / {ref.total_versions} 版</Tag>
+            </Space>
+          }
+          extra={
+            <Button size="small" onClick={() => setOpenKey(openKey === ref.key ? null : ref.key)}>
+              {openKey === ref.key ? '收起' : '查看历史'}
+            </Button>
+          }
+        >
+          {openKey === ref.key && <ArtifactVersions taskID={task.thread_id} keyName={ref.key} />}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function ArtifactVersions({ taskID, keyName }: { taskID: string; keyName: string }) {
+  const [versions, setVersions] = useState<number[]>([]);
+  const [v1, setV1] = useState<number | null>(null);
+  const [v2, setV2] = useState<number | null>(null);
+  const [diff, setDiff] = useState<string>('');
+  useEffect(() => {
+    ArtifactsApi.versions(taskID, keyName)
+      .then((vs) => {
+        setVersions(vs);
+        if (vs.length >= 2) {
+          setV1(vs[vs.length - 1]);
+          setV2(vs[0]);
+        } else if (vs.length === 1) {
+          setV1(vs[0]);
+        }
+      })
+      .catch(() => setVersions([]));
+  }, [taskID, keyName]);
+  useEffect(() => {
+    if (v1 == null || v2 == null || v1 === v2) {
+      setDiff('');
+      return;
+    }
+    ArtifactsApi.diff(taskID, keyName, v1, v2)
+      .then((d) => setDiff(d.unified))
+      .catch(() => setDiff('(diff 失败)'));
+  }, [taskID, keyName, v1, v2]);
+  if (versions.length === 0) {
+    return <Text type="secondary">暂无版本</Text>;
+  }
+  return (
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      <Space>
+        <Text>对比:</Text>
+        <Select
+          size="small"
+          style={{ minWidth: 100 }}
+          value={v1 ?? undefined}
+          onChange={setV1}
+          options={versions.map((v) => ({ value: v, label: `v${v}` }))}
+          placeholder="旧版"
+        />
+        <Text>→</Text>
+        <Select
+          size="small"
+          style={{ minWidth: 100 }}
+          value={v2 ?? undefined}
+          onChange={setV2}
+          options={versions.map((v) => ({ value: v, label: `v${v}` }))}
+          placeholder="新版"
+        />
+      </Space>
+      {diff ? (
+        <pre
+          style={{
+            background: '#fafafa',
+            border: '1px solid #eee',
+            padding: 8,
+            borderRadius: 4,
+            fontSize: 12,
+            maxHeight: 400,
+            overflow: 'auto',
+            whiteSpace: 'pre',
+          }}
+        >
+          {diff}
+        </pre>
+      ) : (
+        <Text type="secondary">{v1 === v2 ? '选两个不同版本可看 diff' : '加载 diff…'}</Text>
+      )}
+    </Space>
   );
 }
 
@@ -449,11 +571,24 @@ function ReviewReportView({ report }: { report: ReviewReport }) {
     revise: 'warning',
     redo: 'error',
   };
+  // 阶段 6:智能路由 target_node 标签(仅在 overall=revise/redo 且 target_node 非空时显示)
+  const showTarget = !!report.target_node && report.overall !== 'pass';
+  const targetLabels: Record<string, string> = {
+    plan_strategy: '策略规划',
+    build_framework: '框架搭建',
+    enrich_content: '内容填充',
+    human_final: '人工介入',
+  };
   return (
     <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <Space>
+      <Space size={4} wrap>
         <Text strong>综合</Text>
         <Tag color={verdictColor[report.overall] ?? 'default'}>{report.overall}</Tag>
+        {showTarget && (
+          <Tag color="green" icon={<BranchesOutlined />}>
+            回流到: {targetLabels[report.target_node!] ?? report.target_node}
+          </Tag>
+        )}
       </Space>
       {report.summary && (
         <div>

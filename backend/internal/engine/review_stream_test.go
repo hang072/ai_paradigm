@@ -14,11 +14,12 @@ import (
 // TestParseReviewStreamText 覆盖哨兵裁定行的解析分支。
 func TestParseReviewStreamText(t *testing.T) {
 	cases := []struct {
-		name        string
-		text        string
-		wantVerdict string
-		wantAdvices int
-		wantErr     bool
+		name         string
+		text         string
+		wantVerdict  string
+		wantAdvices  int
+		wantTarget   string
+		wantErr      bool
 	}{
 		{
 			name:        "pass 无建议",
@@ -48,10 +49,39 @@ func TestParseReviewStreamText(t *testing.T) {
 			text:    "## 点评\n有问题。\n\n裁定: revise",
 			wantErr: true,
 		},
+		// ─── 阶段 6 workbuddy 借鉴:target_node 解析(可选"回流到:"哨兵行)────────
+		{
+			name:        "revise + 回流到: plan_strategy",
+			text:        "## 策略\n配比偏离。\n\n裁定: revise\n回流到: plan_strategy\n- 调整配比至 70/30",
+			wantVerdict: "revise",
+			wantAdvices: 1,
+			wantTarget:  "plan_strategy",
+		},
+		{
+			name:        "revise + 回流到: build_framework",
+			text:        "## 骨架\n与 skeleton 不符。\n\n裁定: revise\n回流到: build_framework\n- 重建 4.2 子节",
+			wantVerdict: "revise",
+			wantAdvices: 1,
+			wantTarget:  "build_framework",
+		},
+		{
+			name:        "revise 缺省 target_node 为空",
+			text:        "## 内容\n有些小问题。\n\n裁定: revise\n- 改一改",
+			wantVerdict: "revise",
+			wantAdvices: 1,
+			wantTarget:  "",
+		},
+		{
+			name:        "pass 不带 target_node(下游分支不看)",
+			text:        "## 综合\n合格。\n\n裁定: pass",
+			wantVerdict: "pass",
+			wantAdvices: 0,
+			wantTarget:  "",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			verdict, advices, err := parseReviewStreamText(c.text)
+			verdict, advices, target, err := parseReviewStreamText(c.text)
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("期望 error, 得到 nil (verdict=%q)", verdict)
@@ -66,6 +96,9 @@ func TestParseReviewStreamText(t *testing.T) {
 			}
 			if len(advices) != c.wantAdvices {
 				t.Fatalf("advices=%d 条, 期望 %d 条", len(advices), c.wantAdvices)
+			}
+			if target != c.wantTarget {
+				t.Fatalf("target_node=%q, 期望 %q", target, c.wantTarget)
 			}
 		})
 	}
@@ -102,7 +135,7 @@ func TestReviewQualityStreamTokenSink(t *testing.T) {
 	}
 
 	verdict, err := reviewQualityStream(context.Background(), taskID, snapStore,
-		[]*schema.Message{{Role: schema.User, Content: "审核"}}, p, sink)
+		[]*schema.Message{{Role: schema.User, Content: "审核"}}, p, sink, nil)
 	if err != nil {
 		t.Fatalf("reviewQualityStream 返回错误: %v", err)
 	}
@@ -142,7 +175,7 @@ func TestReviewQualityStreamEmptyErrors(t *testing.T) {
 
 	p := &streamMockProvider{frames: []string{"", ""}}
 	_, err := reviewQualityStream(context.Background(), taskID, snapStore,
-		[]*schema.Message{{Role: schema.User, Content: "审核"}}, p, func(_, _ string) {})
+		[]*schema.Message{{Role: schema.User, Content: "审核"}}, p, func(_, _ string) {}, nil)
 	verifyEmptyReviewError(t, err, snapStore, taskID)
 }
 

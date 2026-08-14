@@ -11,9 +11,11 @@ const (
 )
 
 // NodeDef 定义:工作流图上的一个节点原型。
-// 对齐 frontend/src/types/node.ts
+// 对齐 frontend/src/types/node.ts。
 //
-// AgentID 用指针以便序列化为 JSON null(compute 节点才有意义)。
+// 阶段 1 扩展(2026-08-11):Config 仍为自由 map[string]any(保持既有用法,
+// 阶段 3 才由 GenericStep 消费)。约定键见 NodeDefConfigConventionKeys 列表;
+// 模板编辑器与 Planner 看到这些键可做更友好的 UI;运行时无 schema 强制。
 type NodeDef struct {
 	ID          string         `json:"id"`
 	Name        string         `json:"name"`
@@ -23,6 +25,18 @@ type NodeDef struct {
 	Config      map[string]any `json:"config"`
 	OutPorts    []string       `json:"out_ports"`
 	Color       string         `json:"color"`
+}
+
+// NodeDefConfigConventionKeys 列出 builtin 节点 + 阶段 3/4 即将消费的约定键。
+// 不强制,只是给编辑器 / Planner 做静态校验时的白名单参考。
+// 真实实现:阶段 3 引入 GenericStepRegistry 严格校验,阶段 1 只做 UI 提示。
+var NodeDefConfigConventionKeys = []string{
+	"system_prompt_template", // 覆盖 AgentDef.system_prompt
+	"input_keys",             // 从 snapshot 读输入字段
+	"output_keys",            // 写 artifact 时的 key
+	"retrieve_kb",            // 是否启用 search_kb
+	"retrieve_pubmed",        // PubMed 检索
+	"cite_rule",              // markdown / numbered / none
 }
 
 func (n *NodeDef) GetID() string   { return n.ID }

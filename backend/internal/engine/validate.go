@@ -230,6 +230,17 @@ func validateReviewQuality(r *ReviewQualityResult) error {
 	if err := validateReviewItems(r.Report.QualityItems, "quality_items"); err != nil {
 		return err
 	}
+	// 阶段 6:target_node 智能路由白名单(plan D2 决策 —— 非法值降级, 不报错)。
+	// overall=pass 时 target_node 不必设(下游分支不看);其它情况必须 ∈ 白名单。
+	if r.Verdict != "pass" {
+		switch r.Report.TargetNode {
+		case "", "enrich_content", "build_framework", "plan_strategy", "human_final":
+			// OK(空 = 默认 enrich_content,引擎后续 AddBranch 会用)
+		default:
+			// 非法值降级:不让 LLM 错一个字符就 fail 整个任务。
+			r.Report.TargetNode = "enrich_content"
+		}
+	}
 	return nil
 }
 

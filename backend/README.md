@@ -87,9 +87,50 @@ go run ./cmd/server
 paradigm_eino backend listening on http://0.0.0.0:8001
   agents=6 nodes=10 templates=3 skills=5 tasks=2 (2 demo)
   llm provider: openai(deepseek-chat) (available=true)
+  pymupdf sidecar: http://localhost:8002 (available=true)
 ```
 
 启动日志的 `available=true` 意味着 5 个 compute 节点会真调 LLM。单个节点若调用失败或 LLM 输出解析失败,**只会该节点回落 mock**(messages 里会有一条 "LLM 失败,已回落 mock"),整个任务仍能推到 done。
+
+### P91 · PDF 解析走 PyMuPDF sidecar
+
+`.pdf` 上传不再走 P85 的 pdfcpu + Qwen-VL 双路径,统一由 **PyMuPDF Python sidecar** 一步抽文本 / 图 / 表 / 原始 page JSON:
+
+| 指标 | P85 (pdfcpu + VLM) | P91 (pymupdf sidecar) |
+|---|---|---|
+| 抽图率 | 0% (CMYK 限制) | 100% (41/41 PoC) |
+| 单 PDF 耗时 | 30-60s (VLM) | 1-2.5s |
+| 依赖 | pdfcpu + Qwen-VL OCR | pymupdf + pymupdf4llm (Python 3.11) |
+
+#### 启 sidecar
+
+**方式一 · docker compose(推荐)**
+
+```bash
+cd backend
+docker compose -f docker-compose.yml up -d pymupdf-sidecar
+# 健康检查: curl http://localhost:8002/health
+```
+
+**方式二 · 本地 uvicorn**
+
+```bash
+cd backend/sidecars/pymupdf-extract
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8002
+```
+
+#### 后端配置
+
+`PYMUPDF_SIDECAR_URL` 默认 `http://localhost:8002`,`PYMUPDF_SIDECAR_TIMEOUT_SEC` 默认 `120`。后端启动时 ping `/health`,失败 → 启动报错(全替决策,不静默降级)。`.pdf` 上传时走 `PymupdfParser` 一步抽完;非 PDF 走原 parser(.md / .docx / 老 .pdf fallback)。
+
+#### 已知限制
+
+- 扫描件 (无文本层) 会返近空 markdown,**不再 fallback VLM**(P91 全替决策)
+- 单 PDF 上限 64 MiB (跟后端上传硬上限对齐)
+- sidecar 不可用时 `go run ./cmd/server` 启动失败 — 先启 sidecar 再启后端
+
+接口契约详见 `sidecars/pymupdf-extract/README.md`。
 
 ## 与前端联调
 

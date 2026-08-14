@@ -70,7 +70,7 @@ func TestEnrichContentStreamTokenSink(t *testing.T) {
 	}
 
 	msgs := []*schema.Message{{Role: schema.User, Content: "填充"}}
-	if err := enrichContentStream(context.Background(), taskID, snapStore, msgs, p, sink, nil); err != nil {
+	if err := enrichContentStream(context.Background(), taskID, snapStore, msgs, p, sink, nil, nil); err != nil {
 		t.Fatalf("enrichContentStream 返回错误: %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestEnrichContentStreamEmptyErrors(t *testing.T) {
 	sink := func(_, _ string) {}
 
 	err := enrichContentStream(context.Background(), taskID, snapStore,
-		[]*schema.Message{{Role: schema.User, Content: "填充"}}, p, sink, nil)
+		[]*schema.Message{{Role: schema.User, Content: "填充"}}, p, sink, nil, nil)
 	if err == nil {
 		t.Fatal("空输出应返回 error, 得到 nil")
 	}
@@ -152,7 +152,7 @@ func TestEnrichContentStreamCapturesCitations(t *testing.T) {
 	p := &streamMockProvider{frames: []string{body}}
 
 	err := enrichContentStream(context.Background(), taskID, snapStore,
-		[]*schema.Message{{Role: schema.User, Content: "填充"}}, p, func(_, _ string) {}, sources)
+		[]*schema.Message{{Role: schema.User, Content: "填充"}}, p, func(_, _ string) {}, sources, nil)
 	if err != nil {
 		t.Fatalf("enrichContentStream 返回错误: %v", err)
 	}
